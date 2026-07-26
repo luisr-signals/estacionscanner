@@ -436,13 +436,19 @@ export async function saveManualAdjustment(
     if (rpcError.code === "42501" || /autorizado|permission|permiso/i.test(message)) {
       throw new StationScanError("SCAN_PERMISSION_DENIED", "Esta cuenta no tiene permiso para ajustar produccion.", 403);
     }
-    if (/jornada/i.test(message)) {
+    if (/NO_ACTIVE_SHIFT|jornada/i.test(message)) {
       throw new StationScanError("SHIFT_INACTIVE", "La jornada de " + payload.profile.bandName + " no esta disponible.", 409);
     }
-    if (/bloque|horario/i.test(message)) {
+    if (/NO_ACTIVE_BLOCK|bloque|horario/i.test(message)) {
       throw new StationScanError("OUTSIDE_HOUR_BLOCK", "Fuera de bloque horario.", 409);
     }
-    if (/disponibles|quitar|cero/i.test(message)) {
+    if (/PRODUCT_NOT_WORKED/i.test(message)) {
+      throw new StationScanError("PRODUCT_NOT_WORKED", "Este modelo no esta disponible para ajustar.", 409);
+    }
+    if (/PRODUCT_NOT_AVAILABLE/i.test(message)) {
+      throw new StationScanError("PRODUCT_NOT_WORKED", "Producto no disponible.", 409);
+    }
+    if (/REMOVE_NOT_AVAILABLE|disponibles|quitar|cero/i.test(message)) {
       throw new StationScanError("REMOVE_NOT_AVAILABLE", "No hay pares disponibles para quitar.", 409);
     }
     throw new StationScanError("ADJUSTMENT_FAILED", "No fue posible guardar el ajuste.", 500, true);

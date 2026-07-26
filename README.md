@@ -47,6 +47,7 @@ npm run build
 - `POST /api/station/login`
 - `GET /api/station/status`
 - `POST /api/station/scan`
+- `POST /api/station/adjust`
 - `GET /api/station/recent`
 - `POST /api/station/logout`
 
@@ -62,6 +63,7 @@ Antes de escribir registros de produccion hay que mapear el esquema real en `api
 - Valor real para origen `scanner` y estado inicial.
 - Como se calculan total por hora, meta por hora y total del dia.
 - Estrategia persistente de idempotencia: tabla, columna o constraint unico por usuario/estacion + `scanId`.
+- Como representa DinoCore los ajustes manuales `+1` y `-1`, incluyendo origen `manual_adjustment`, motivo/accion y reglas para no dejar totales negativos.
 
 Mientras ese mapeo no exista, la API responde `SCHEMA_MAPPING_REQUIRED` y no inventa nombres de tablas ni escribe datos simulados como produccion.
 

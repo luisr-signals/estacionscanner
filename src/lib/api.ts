@@ -15,10 +15,13 @@ export type StationStatus = {
   pendingCount: number;
 };
 
+export type MovementQuantity = 1 | -1;
+
 export type ScanResult =
   | {
       ok: true;
       product: string;
+      productId?: string;
       scannedAt: string;
       hourTotal: number;
       hourGoal: number | null;
@@ -29,10 +32,27 @@ export type ScanResult =
 
 export type RecentScan = {
   id: string;
+  productId: string;
   product: string;
   scannedAt: string;
-  status: "saved" | "rejected";
+  quantity: MovementQuantity;
+  status: "saved" | "rejected" | "adjusted";
+  availableToRemove: boolean;
 };
+
+export type AdjustmentResult =
+  | {
+      ok: true;
+      product: string;
+      productId: string;
+      quantity: MovementQuantity;
+      adjustedAt: string;
+      hourTotal: number;
+      hourGoal: number | null;
+      dayTotal: number;
+      duplicate: boolean;
+    }
+  | { ok: false; code: string; message: string; retryable?: boolean };
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -74,5 +94,12 @@ export function submitScan(barcode: string, scanId: string) {
   return requestJson<ScanResult>("/api/station/scan", {
     method: "POST",
     body: JSON.stringify({ barcode, scanId })
+  });
+}
+
+export function submitAdjustment(productId: string, quantity: MovementQuantity, adjustmentId: string) {
+  return requestJson<AdjustmentResult>("/api/station/adjust", {
+    method: "POST",
+    body: JSON.stringify({ productId, quantity, adjustmentId })
   });
 }

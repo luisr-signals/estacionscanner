@@ -27,7 +27,15 @@ export type ScanPayload = {
   profile: StationProfile;
 };
 
+export type ManualAdjustmentPayload = {
+  productId: string;
+  quantity: 1 | -1;
+  adjustmentId: string;
+  profile: StationProfile;
+};
+
 export type SavedScan = {
+  productId: string;
   product: string;
   scannedAt: string;
   hourTotal: number;
@@ -37,9 +45,12 @@ export type SavedScan = {
 
 export type RecentScanData = {
   id: string;
+  productId: string;
   product: string;
   scannedAt: string;
-  status: "saved" | "rejected";
+  quantity: 1 | -1;
+  status: "saved" | "rejected" | "adjusted";
+  availableToRemove: boolean;
 };
 
 export function getSupabaseForToken(accessToken: string): SupabaseClient {
@@ -72,6 +83,13 @@ export async function getStationStatus(_client: SupabaseClient, _profile: Statio
 }
 
 export async function saveStationScan(_client: SupabaseClient, _payload: ScanPayload): Promise<SavedScan> {
+  throw new Error("SCHEMA_MAPPING_REQUIRED");
+}
+
+export async function saveManualAdjustment(
+  _client: SupabaseClient,
+  _payload: ManualAdjustmentPayload
+): Promise<SavedScan> {
   throw new Error("SCHEMA_MAPPING_REQUIRED");
 }
 

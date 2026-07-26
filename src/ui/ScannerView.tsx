@@ -1,32 +1,98 @@
-import { KeyboardEvent, useEffect, useRef, useState } from "react";
-import { getRecent, getStatus, logout, RecentScan, StationStatus, submitScan } from "../lib/api";
+import { KeyboardEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  getRecent,
+  getStatus,
+  logout,
+  MovementQuantity,
+  RecentScan,
+  StationStatus,
+  submitAdjustment,
+  submitScan
+} from "../lib/api";
+import { canConfirmAdjustment, RecentProduct, recentProductsFromScans } from "../lib/manual";
 import { canSubmitScan, createScanId, normalizeBarcode, scannerTone, ScannerState } from "../lib/scanner";
 
 type Props = {
   onLogout: () => void;
 };
 
+type Notice = {
+  tone: "success" | "error" | "waiting" | "offline";
+  title: string;
+  detail: string;
+};
+
+type ManualAction = "add" | "remove";
+
 type Totals = {
   hourTotal: number;
   hourGoal: number | null;
-  dayTotal: number;
-  pendingCount: number;
 };
 
-const emptyTotals: Totals = { hourTotal: 0, hourGoal: null, dayTotal: 0, pendingCount: 0 };
+const emptyTotals: Totals = { hourTotal: 0, hourGoal: null };
 
 export function ScannerView({ onLogout }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const busyRef = useRef(false);
+  const noticeTimerRef = useRef<number | null>(null);
   const [barcode, setBarcode] = useState("");
   const [status, setStatus] = useState<StationStatus | null>(null);
   const [recent, setRecent] = useState<RecentScan[]>([]);
   const [scannerState, setScannerState] = useState<ScannerState>("ready");
-  const [message, setMessage] = useState("Listo para escanear");
-  const [lastProduct, setLastProduct] = useState("Sin registros todavia");
+  const [notice, setNotice] = useState<Notice | null>(null);
   const [busy, setBusy] = useState(false);
+  const [manualBusy, setManualBusy] = useState(false);
   const [online, setOnline] = useState(navigator.onLine);
   const [clock, setClock] = useState(new Date());
   const [totals, setTotals] = useState<Totals>(emptyTotals);
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualAction, setManualAction] = useState<ManualAction | null>(null);
+  const [selectedProduct, setSelectedProduct] = useState<RecentProduct | null>(null);
+
+  const recentProducts = useMemo(() => recentProductsFromScans(recent), [recent]);
+
+  const focusInput = useCallback(() => {
+    if (manualOpen) return;
+    window.setTimeout(() => {
+      if (inputRef.current) inputRef.current.focus();
+    }, 30);
+  }, [manualOpen]);
+
+  const showNotice = useCallback((nextNotice: Notice, autoHide: boolean) => {
+    if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
+    setNotice(nextNotice);
+    if (autoHide) {
+      noticeTimerRef.current = window.setTimeout(() => setNotice(null), 2000);
+    }
+  }, []);
+
+  const refresh = useCallback(() => {
+    getStatus()
+      .then((result) => {
+        if (!result.ok) {
+          setNotice({ tone: "error", title: "Sesion o estacion no disponible", detail: result.message });
+          return;
+        }
+        setStatus(result);
+        setTotals({ hourTotal: result.hourTotal, hourGoal: result.hourGoal });
+        if (result.shiftStatus !== "active") {
+          setScannerState("paused");
+          setNotice({ tone: "offline", title: "Sin jornada activa", detail: "Espera a que DinoCore abra la jornada" });
+        } else if (online && scannerState !== "waiting") {
+          setScannerState("ready");
+        }
+      })
+      .catch(() => {
+        setScannerState("offline");
+        setNotice({ tone: "offline", title: "Sin conexion", detail: "No se pudo consultar la estacion" });
+      });
+
+    getRecent()
+      .then((result) => {
+        if (result.ok) setRecent(result.scans.slice(0, 20));
+      })
+      .catch(() => undefined);
+  }, [online, scannerState]);
 
   useEffect(() => {
     refresh();
@@ -35,12 +101,12 @@ export function ScannerView({ onLogout }: Props) {
     const onOnline = () => {
       setOnline(true);
       setScannerState("ready");
-      setMessage("Conexion recuperada");
+      setNotice({ tone: "success", title: "Conexion recuperada", detail: "Listo para escanear" });
     };
     const onOffline = () => {
       setOnline(false);
       setScannerState("offline");
-      setMessage("Sin conexion");
+      setNotice({ tone: "offline", title: "Sin conexion", detail: "No se confirmaran registros sin servidor" });
     };
 
     window.addEventListener("online", onOnline);
@@ -50,52 +116,23 @@ export function ScannerView({ onLogout }: Props) {
       window.clearInterval(clockTimer);
       window.removeEventListener("online", onOnline);
       window.removeEventListener("offline", onOffline);
+      if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
     };
-  }, []);
+  }, [refresh]);
 
   useEffect(() => {
     focusInput();
-  }, [scannerState, busy]);
-
-  function focusInput() {
-    window.setTimeout(() => inputRef.current && inputRef.current.focus(), 30);
-  }
-
-  function refresh() {
-    getStatus()
-      .then((result) => {
-        if (!result.ok) {
-          setMessage(result.message);
-          return;
-        }
-        setStatus(result);
-        setTotals({
-          hourTotal: result.hourTotal,
-          hourGoal: result.hourGoal,
-          dayTotal: result.dayTotal,
-          pendingCount: result.pendingCount
-        });
-        if (result.shiftStatus !== "active") setScannerState("paused");
-      })
-      .catch(() => {
-        setScannerState("offline");
-        setMessage("Sin conexion");
-      });
-
-    getRecent()
-      .then((result) => {
-        if (result.ok) setRecent(result.scans);
-      })
-      .catch(() => undefined);
-  }
+  }, [scannerState, busy, manualOpen, focusInput]);
 
   function playTone(state: ScannerState) {
     const tone = scannerTone(state);
-    if (!tone || typeof AudioContext === "undefined") return;
-    const audio = new AudioContext();
+    const AudioCtor = window.AudioContext || window.webkitAudioContext;
+    if (!tone || !AudioCtor) return;
+    const audio = new AudioCtor();
     const oscillator = audio.createOscillator();
     const gain = audio.createGain();
     oscillator.frequency.value = tone.frequency;
+    gain.gain.value = 0.06;
     oscillator.connect(gain);
     gain.connect(audio.destination);
     oscillator.start();
@@ -112,57 +149,104 @@ export function ScannerView({ onLogout }: Props) {
   }
 
   function processScan() {
+    if (busyRef.current) return;
     if (!canSubmitScan(barcode, busy, online)) {
-      if (!online) setMessage("Sin conexion");
+      if (!online) showNotice({ tone: "offline", title: "Sin conexion", detail: "Reintenta cuando vuelva la red" }, false);
       focusInput();
       return;
     }
 
     const cleanBarcode = normalizeBarcode(barcode);
     const scanId = createScanId();
+    busyRef.current = true;
     setBusy(true);
     setScannerState("waiting");
-    setMessage("Guardando registro...");
+    showNotice({ tone: "waiting", title: "Guardando registro...", detail: cleanBarcode }, false);
 
     submitScan(cleanBarcode, scanId)
       .then((result) => {
         if (result.ok) {
           setScannerState("success");
-          setMessage(result.duplicate ? "Registro ya confirmado" : "Registro guardado");
-          setLastProduct(result.product);
           setBarcode("");
-          setTotals({
-            hourTotal: result.hourTotal,
-            hourGoal: result.hourGoal,
-            dayTotal: result.dayTotal,
-            pendingCount: totals.pendingCount
-          });
+          setTotals({ hourTotal: result.hourTotal, hourGoal: result.hourGoal });
+          showNotice(
+            {
+              tone: "success",
+              title: result.duplicate ? "Registro ya confirmado" : "+1 par registrado",
+              detail: result.product
+            },
+            true
+          );
           playTone("success");
           refresh();
         } else {
           setScannerState("error");
-          setMessage(result.message);
+          showNotice({ tone: "error", title: result.message, detail: result.code }, false);
           playTone("error");
         }
       })
       .catch(() => {
         setScannerState("offline");
-        setMessage("Sin conexion. Reintenta cuando vuelva la red.");
+        showNotice({ tone: "offline", title: "Sin conexion", detail: "No se confirmo el registro" }, false);
       })
       .finally(() => {
+        busyRef.current = false;
         setBusy(false);
         focusInput();
       });
   }
 
-  function reactivate() {
-    if (!online) {
-      setScannerState("offline");
-      setMessage("Sin conexion");
-      return;
-    }
-    setScannerState("ready");
-    setMessage("Listo para escanear");
+  function openManualPanel() {
+    setManualOpen(true);
+    setManualAction(null);
+    setSelectedProduct(null);
+  }
+
+  function closeManualPanel() {
+    setManualOpen(false);
+    setManualAction(null);
+    setSelectedProduct(null);
+    focusInput();
+  }
+
+  function confirmAdjustment() {
+    if (!canConfirmAdjustment(manualAction, selectedProduct, manualBusy)) return;
+    const product = selectedProduct as RecentProduct;
+    const quantity: MovementQuantity = manualAction === "remove" ? -1 : 1;
+    const adjustmentId = createScanId();
+    setManualBusy(true);
+    showNotice({ tone: "waiting", title: "Guardando ajuste...", detail: product.product }, false);
+
+    submitAdjustment(product.productId, quantity, adjustmentId)
+      .then((result) => {
+        if (result.ok) {
+          setTotals({ hourTotal: result.hourTotal, hourGoal: result.hourGoal });
+          showNotice(
+            {
+              tone: quantity > 0 ? "success" : "error",
+              title: quantity > 0 ? "+1 par registrado" : "-1 par registrado",
+              detail: result.product
+            },
+            true
+          );
+          playTone(quantity > 0 ? "success" : "error");
+          closeManualPanel();
+          refresh();
+        } else {
+          showNotice({ tone: "error", title: result.message, detail: result.code }, false);
+          playTone("error");
+        }
+      })
+      .catch(() => showNotice({ tone: "offline", title: "Sin conexion", detail: "No se confirmo el ajuste" }, false))
+      .finally(() => {
+        setManualBusy(false);
+        focusInput();
+      });
+  }
+
+  function handlePageClick(event: MouseEvent<HTMLElement>) {
+    const target = event.target as HTMLElement;
+    if (target.tagName === "BUTTON" || target.tagName === "INPUT" || target.tagName === "LABEL") return;
     focusInput();
   }
 
@@ -170,97 +254,179 @@ export function ScannerView({ onLogout }: Props) {
     logout().finally(onLogout);
   }
 
-  const difference = totals.hourGoal == null ? null : totals.hourTotal - totals.hourGoal;
-
   return (
-    <main className={"scanner-page scanner-" + scannerState}>
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Estacion 337</p>
-          <h1>Escaneo en vivo</h1>
+    <main className="scanner-page" onClick={handlePageClick}>
+      <header className="station-header">
+        <div className="station-title">
+          <div>
+            <strong>ESTACION 337</strong>
+            <span className={"activity-dot dot-" + dotStatus(status, online)} aria-hidden="true" />
+          </div>
+          <p>{status ? status.bandName + " · " + labelShift(status.shiftStatus) : "Cargando estacion"}</p>
         </div>
-        <button className="secondary-button" onClick={handleLogout} type="button">
+        <time className="station-clock">{formatClock(clock)}</time>
+        <button className="logout-button" onClick={handleLogout} type="button">
           Cerrar sesion
         </button>
       </header>
 
-      <section className="status-strip">
-        <strong>{status ? status.bandName : "Banda sin cargar"}</strong>
-        <span>{status ? labelShift(status.shiftStatus) : "Validando jornada"}</span>
-        <span>{online ? message : "Sin conexion"}</span>
-        <time>{clock.toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time>
-      </section>
-
-      <section className="scan-workspace">
-        <div className="capture-panel">
-          <label htmlFor="barcode">Captura del lector</label>
+      <section className="scan-row" aria-label="Captura principal">
+        <div className="scan-input-card">
+          <label htmlFor="barcode">Escanea el codigo</label>
           <input
             ref={inputRef}
             autoCapitalize="off"
             autoComplete="off"
             autoCorrect="off"
+            autoFocus
             disabled={busy || scannerState === "paused"}
             id="barcode"
-            inputMode="numeric"
+            inputMode="none"
             onBlur={focusInput}
             onChange={(event) => setBarcode(event.target.value)}
             onKeyDown={handleKeyDown}
+            placeholder="El lector escribe aqui y envia Enter"
+            type="text"
             value={barcode}
           />
-          <div className="scan-actions">
-            <button className="secondary-button" onClick={reactivate} type="button">
-              Reactivar escaner
-            </button>
-            <button className="primary-button" disabled={busy || !barcode} onClick={processScan} type="button">
-              Registrar
-            </button>
-          </div>
-          <p className="last-product">{lastProduct}</p>
         </div>
-
-        <aside className="totals-panel">
-          <Metric label="Total hora" value={totals.hourTotal} />
-          <Metric label="Meta hora" value={totals.hourGoal == null ? "N/D" : totals.hourGoal} />
-          <Metric label="Diferencia" value={difference == null ? "N/D" : difference} />
-          <Metric label="Total dia" value={totals.dayTotal} />
-          <Metric label="Pendientes" value={totals.pendingCount} />
+        <aside className="hour-total-card">
+          <span>TOTAL ESTA HORA</span>
+          <strong>{totals.hourTotal}</strong>
         </aside>
       </section>
 
-      <section className="recent-panel">
-        <h2>Ultimos registros</h2>
-        {recent.length === 0 ? (
-          <p className="muted">Aun no hay registros recientes.</p>
-        ) : (
-          <ol>
-            {recent.slice(0, 20).map((scan) => (
-              <li key={scan.id}>
-                <span>{scan.product}</span>
-                <time>{formatTime(scan.scannedAt)}</time>
-              </li>
-            ))}
-          </ol>
-        )}
+      {notice && (
+        <section className={"scan-notice notice-" + notice.tone} role="status">
+          <strong>{notice.title}</strong>
+          <span>{notice.detail}</span>
+        </section>
+      )}
+
+      <section className="recent-card">
+        <div className="recent-heading">
+          <h2>Ultimos escaneos</h2>
+          <button className="manual-button" onClick={openManualPanel} type="button" aria-label="Ajuste manual">
+            ±
+          </button>
+        </div>
+        <div className="recent-table" role="table" aria-label="Ultimos escaneos">
+          <div className="recent-table-head" role="row">
+            <span role="columnheader">REGISTRO</span>
+            <span role="columnheader">PRODUCTO</span>
+            <span role="columnheader">HORA</span>
+          </div>
+          {recent.length === 0 ? (
+            <p className="empty-recent">Aun no hay movimientos recientes.</p>
+          ) : (
+            recent.slice(0, 20).map((scan) => (
+              <div className="recent-table-row" role="row" key={scan.id}>
+                <strong className={scan.quantity > 0 ? "qty-plus" : "qty-minus"} role="cell">
+                  {scan.quantity > 0 ? "+1" : "-1"}
+                </strong>
+                <span role="cell">{scan.product}</span>
+                <time role="cell">{formatMovementTime(scan.scannedAt)}</time>
+              </div>
+            ))
+          )}
+        </div>
       </section>
+
+      {manualOpen && (
+        <section className="manual-overlay" role="dialog" aria-modal="true" aria-labelledby="manual-title">
+          <div className="manual-panel">
+            <div className="manual-title-row">
+              <h2 id="manual-title">Ajuste manual</h2>
+              <button className="close-button" onClick={closeManualPanel} type="button">
+                Cerrar
+              </button>
+            </div>
+
+            <div className="manual-options" role="group" aria-label="Tipo de ajuste">
+              <button
+                className={manualAction === "add" ? "selected-option" : ""}
+                onClick={() => setManualAction("add")}
+                type="button"
+              >
+                Agregar
+              </button>
+              <button
+                className={manualAction === "remove" ? "selected-option danger-option" : "danger-option"}
+                onClick={() => setManualAction("remove")}
+                type="button"
+              >
+                Quitar
+              </button>
+            </div>
+
+            <h3>Modelos recientes</h3>
+            <div className="manual-products">
+              {recentProducts.length === 0 ? (
+                <p className="empty-recent">No hay modelos recientes para ajustar.</p>
+              ) : (
+                recentProducts.map((product) => (
+                  <button
+                    className={selectedProduct && selectedProduct.productId === product.productId ? "selected-product" : ""}
+                    disabled={manualAction === "remove" && !product.availableToRemove}
+                    key={product.productId}
+                    onClick={() => setSelectedProduct(product)}
+                    type="button"
+                  >
+                    {product.product}
+                  </button>
+                ))
+              )}
+            </div>
+
+            {manualAction && selectedProduct && (
+              <div className="manual-confirmation">
+                <strong>{manualAction === "add" ? "Agregar 1 par" : "Quitar 1 par"}</strong>
+                <span>{selectedProduct.product}</span>
+              </div>
+            )}
+
+            <button
+              className="confirm-adjustment-button"
+              disabled={!canConfirmAdjustment(manualAction, selectedProduct, manualBusy)}
+              onClick={confirmAdjustment}
+              type="button"
+            >
+              {manualBusy ? "Guardando..." : "Confirmar ajuste"}
+            </button>
+          </div>
+        </section>
+      )}
     </main>
   );
 }
 
-function Metric({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div className="metric">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
+function dotStatus(status: StationStatus | null, online: boolean) {
+  if (!online) return "offline";
+  if (!status || status.shiftStatus !== "active") return "paused";
+  return "active";
 }
 
 function labelShift(value: StationStatus["shiftStatus"]) {
   if (value === "active") return "Jornada activa";
-  if (value === "paused") return "Scanner pausado";
+  if (value === "paused") return "Escaner pausado";
   return "Sin jornada";
 }
 
-function formatTime(value: string) {
-  return new Date(value).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" });
+function formatClock(value: Date) {
+  return value.toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+    timeZone: "America/Mexico_City"
+  });
+}
+
+function formatMovementTime(value: string) {
+  return new Date(value).toLocaleTimeString("es-MX", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZone: "America/Mexico_City"
+  });
 }

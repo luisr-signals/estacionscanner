@@ -16,7 +16,10 @@ describe("scanner capture helpers", () => {
   it("creates unique client scan ids", () => {
     vi.spyOn(Math, "random").mockReturnValueOnce(0.1).mockReturnValueOnce(0.2);
     const now = new Date("2026-07-25T18:42:49-06:00");
-    expect(createScanId(now)).not.toEqual(createScanId(now));
+    const first = createScanId(now);
+    const second = createScanId(now);
+    expect(first).not.toEqual(second);
+    expect(first).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   });
 
   it("only defines sounds for confirmed success and server rejection", () => {

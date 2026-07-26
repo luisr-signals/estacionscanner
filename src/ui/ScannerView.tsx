@@ -188,7 +188,14 @@ export function ScannerView({ onLogout }: Props) {
           refresh();
         } else {
           setScannerState("error");
-          showNotice({ tone: "error", title: result.message, detail: result.code }, false);
+          showNotice(
+            {
+              tone: "error",
+              title: result.message,
+              detail: result.code === "UNKNOWN_BARCODE" ? "Revisa la etiqueta e intenta nuevamente." : result.code
+            },
+            false
+          );
           playTone("error");
         }
       })
@@ -204,9 +211,8 @@ export function ScannerView({ onLogout }: Props) {
   }
 
   function openManualPanel() {
-    setManualOpen(true);
-    setManualAction(null);
-    setSelectedProduct(null);
+    showNotice({ tone: "offline", title: "Ajustes manuales proximamente", detail: "Esta fase solo habilita escaneos." }, true);
+    focusInput();
   }
 
   function closeManualPanel() {
@@ -326,7 +332,7 @@ export function ScannerView({ onLogout }: Props) {
           {recent.length === 0 ? (
             <p className="empty-recent">Aun no hay movimientos recientes.</p>
           ) : (
-            recent.slice(0, 20).map((scan) => (
+            recent.slice(0, 3).map((scan) => (
               <div className="recent-table-row" role="row" key={scan.id}>
                 <strong className={scan.quantity > 0 ? "qty-plus" : "qty-minus"} role="cell">
                   {scan.quantity > 0 ? "+1" : "-1"}

@@ -30,12 +30,12 @@ export default async function handler(req: ApiRequest, res: ApiResponse<any>) {
     const profile = await getStationProfile(client);
     const previous = adjustmentStore.get(profile.userId, adjustmentId);
     if (previous) {
-      return res.status(200).json({ ok: true, duplicate: true, quantity, adjustedAt: previous.result.scannedAt, ...previous.result });
+      return res.status(200).json({ ok: true, ...previous.result, duplicate: true, quantity, adjustedAt: previous.result.scannedAt });
     }
 
     const saved = await saveManualAdjustment(client, { productId, quantity, adjustmentId, profile });
     adjustmentStore.save(profile.userId, adjustmentId, saved);
-    return res.status(200).json({ ok: true, duplicate: false, quantity, adjustedAt: saved.scannedAt, ...saved });
+    return res.status(200).json({ ok: true, ...saved, duplicate: false, quantity, adjustedAt: saved.scannedAt });
   } catch (error) {
     if ((error as Error).message === "SCHEMA_MAPPING_REQUIRED") {
       return jsonError(res, 501, "SCHEMA_MAPPING_REQUIRED", schemaMappingMessage());

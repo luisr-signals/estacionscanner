@@ -1,5 +1,6 @@
 import { FormEvent, useState } from "react";
 import { LoginResponse } from "../lib/api";
+import { loginMessageForCode } from "../lib/loginErrors";
 
 type Props = {
   error: string;
@@ -24,9 +25,9 @@ export function LoginView({ error, onLogin }: Props) {
     setBusy(true);
     onLogin(email.trim(), password)
       .then((result) => {
-        if (!result.ok) setLocalError(result.message);
+        if (!result.ok) setLocalError(loginMessageForCode(result.code, result.message));
       })
-      .catch(() => setLocalError("No fue posible iniciar sesion. Revisa la conexion."))
+      .catch(() => setLocalError(loginMessageForCode("LOGIN_NETWORK_ERROR", "")))
       .finally(() => setBusy(false));
   }
 

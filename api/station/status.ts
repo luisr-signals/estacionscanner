@@ -1,5 +1,5 @@
-import { ApiRequest, ApiResponse, getSessionToken, jsonError, methodNotAllowed } from "../_lib/http";
-import { getStationProfile, getStationStatus, getSupabaseForToken, schemaMappingMessage } from "../_lib/supabase";
+import { ApiRequest, ApiResponse, getSessionToken, jsonError, methodNotAllowed } from "../_lib/http.js";
+import { getStationProfile, getStationStatus, getSupabaseForToken, schemaMappingMessage } from "../_lib/supabase.js";
 
 export default async function handler(req: ApiRequest, res: ApiResponse<any>) {
   if (req.method !== "GET") return methodNotAllowed(res);

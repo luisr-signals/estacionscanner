@@ -1,6 +1,6 @@
-import { ApiRequest, ApiResponse, getSessionToken, jsonError, methodNotAllowed, readString } from "../_lib/http";
-import { InMemoryIdempotencyStore } from "../_lib/idempotency";
-import { getStationProfile, getSupabaseForToken, saveStationScan, SavedScan, schemaMappingMessage } from "../_lib/supabase";
+import { ApiRequest, ApiResponse, getSessionToken, jsonError, methodNotAllowed, readString } from "../_lib/http.js";
+import { InMemoryIdempotencyStore } from "../_lib/idempotency.js";
+import { getStationProfile, getSupabaseForToken, saveStationScan, SavedScan, schemaMappingMessage } from "../_lib/supabase.js";
 
 const idempotencyStore = new InMemoryIdempotencyStore<SavedScan>();
 

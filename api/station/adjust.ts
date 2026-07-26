@@ -1,12 +1,12 @@
-import { ApiRequest, ApiResponse, getSessionToken, jsonError, methodNotAllowed, readString } from "../_lib/http";
-import { InMemoryIdempotencyStore } from "../_lib/idempotency";
+import { ApiRequest, ApiResponse, getSessionToken, jsonError, methodNotAllowed, readString } from "../_lib/http.js";
+import { InMemoryIdempotencyStore } from "../_lib/idempotency.js";
 import {
   getStationProfile,
   getSupabaseForToken,
   saveManualAdjustment,
   SavedScan,
   schemaMappingMessage
-} from "../_lib/supabase";
+} from "../_lib/supabase.js";
 
 const adjustmentStore = new InMemoryIdempotencyStore<SavedScan>();
 

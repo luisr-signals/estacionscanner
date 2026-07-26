@@ -81,7 +81,7 @@ export function logout() {
 }
 
 export function getStatus() {
-  return requestJson<StationStatus | { ok: false; message: string }>("/api/station/status");
+  return requestJson<StationStatus | { ok: false; code: string; message: string }>("/api/station/status");
 }
 
 export function getRecent() {

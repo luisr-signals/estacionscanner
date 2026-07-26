@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getStatus, LoginResponse, login } from "../lib/api";
+import { loginMessageForCode } from "../lib/loginErrors";
 import { LoginView } from "./LoginView";
 import { ScannerView } from "./ScannerView";
 
@@ -11,7 +12,10 @@ export function App() {
 
   useEffect(() => {
     getStatus()
-      .then((status) => setSession(status.ok ? "logged-in" : "logged-out"))
+      .then((status) => {
+        if (status.ok || status.code === "SCHEMA_MAPPING_REQUIRED") setSession("logged-in");
+        else setSession("logged-out");
+      })
       .catch(() => setSession("logged-out"));
   }, []);
 
@@ -19,7 +23,7 @@ export function App() {
     setSessionError("");
     return login(email, password).then((result) => {
       if (result.ok) setSession("logged-in");
-      else setSessionError(result.message);
+      else setSessionError(loginMessageForCode(result.code, result.message));
       return result;
     });
   }

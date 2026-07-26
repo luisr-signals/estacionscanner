@@ -105,14 +105,21 @@ export function DisplayView({ onLogout }: Props) {
       )}
 
       {!status ? (
-        <section className="display-empty">
+        <section className="display-empty display-empty-loading">
+          <div className="empty-orbit" aria-hidden="true" />
           <strong>Cargando tablero</strong>
           <span>Consultando estado de la banda.</span>
         </section>
       ) : status.shiftStatus !== "active" ? (
         <section className="display-empty">
-          <strong>{status.bandName.toUpperCase()}</strong>
-          <span>Sin jornada activa</span>
+          <div className="display-empty-kicker">{status.bandName.toUpperCase()}</div>
+          <strong>Sin jornada activa</strong>
+          <span>El tablero se encendera cuando DinoCore abra la jornada.</span>
+          <div className="display-empty-summary">
+            <Metric title="TOTAL DEL DIA" value={status.dayTotal} />
+            <Metric title="META DEL DIA" value={status.dayGoal} />
+            <Metric title="ESTADO" value="En espera" compact />
+          </div>
         </section>
       ) : (
         <>

@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  assertStationMode,
+  getDisplayStatus,
   getManualProducts,
   getRecentScans,
   getStationStatus,
@@ -14,7 +16,8 @@ const profile: StationProfile = {
   role: "scanner_operator",
   bandId: 1,
   bandName: "Banda 1",
-  stationId: "Estacion 337"
+  stationId: "Estacion 337",
+  stationMode: "scanner"
 };
 
 const product = {
@@ -244,6 +247,69 @@ describe("station operational status", () => {
       blockStatus: "missing",
       scannerStatus: "disabled"
     });
+  });
+});
+
+describe("station display mode", () => {
+  it("keeps scanner writes restricted to scanner mode", () => {
+    expect(() => assertStationMode(profile, "scanner")).not.toThrow();
+    expect(() => assertStationMode({ ...profile, stationMode: "band_display" }, "scanner")).toThrow(
+      "Esta cuenta no puede escribir en el scanner."
+    );
+  });
+
+  it("calculates display totals from the current block and operating day", async () => {
+    const displayProfile = { ...profile, stationMode: "band_display" as const };
+    const client = makeClient({
+      product,
+      rpc: vi.fn(),
+      jornada: { meta_por_hora: 71 },
+      registros: [
+        { id: "block-1", pares: 35, hora_inicio_bloque: 8, duracion: 1, orden: 1 },
+        { id: "block-2", pares: 9, hora_inicio_bloque: 9, duracion: 1, orden: 2 },
+        { id: "block-3", pares: 0, hora_inicio_bloque: 11, duracion: 1, orden: 3 }
+      ]
+    });
+
+    const status = await getDisplayStatus(client, displayProfile, mexicoDateAtHour(9.5));
+
+    expect(status).toMatchObject({
+      bandName: "Banda 1",
+      shiftStatus: "active",
+      blockStatus: "active",
+      hourTotal: 9,
+      hourGoal: 71,
+      hourRemaining: 62,
+      dayTotal: 44,
+      dayGoal: 213,
+      expectedTotal: 107,
+      delay: 63,
+      paceStatus: "behind"
+    });
+  });
+
+  it("keeps daily display totals visible during break time", async () => {
+    const displayProfile = { ...profile, stationMode: "band_display" as const };
+    const client = makeClient({
+      product,
+      rpc: vi.fn(),
+      jornada: { meta_por_hora: 50 },
+      registros: [
+        { id: "block-1", pares: 50, hora_inicio_bloque: 8, duracion: 1, orden: 1 },
+        { id: "block-2", pares: 0, hora_inicio_bloque: 11, duracion: 1, orden: 2 }
+      ]
+    });
+
+    const status = await getDisplayStatus(client, displayProfile, mexicoDateAtHour(10));
+
+    expect(status).toMatchObject({
+      blockStatus: "break",
+      hourTotal: 0,
+      hourGoal: null,
+      dayTotal: 50,
+      dayGoal: 100
+    });
+    expect(status.nextBlockStartsAt).toContain("T11:00:00-06:00");
   });
 });
 

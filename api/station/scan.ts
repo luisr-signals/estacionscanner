@@ -1,5 +1,6 @@
 import { ApiRequest, ApiResponse, getSessionToken, jsonError, methodNotAllowed, readString } from "../_lib/http.js";
 import {
+  assertStationMode,
   getStationProfile,
   getSupabaseForToken,
   saveStationScan,
@@ -24,6 +25,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse<any>) {
   try {
     const client = getSupabaseForToken(token);
     const profile = await getStationProfile(client);
+    assertStationMode(profile, "scanner");
     const saved = await saveStationScan(client, { barcode, scanId, profile });
     return res.status(200).json({ ok: true, ...saved });
   } catch (error) {

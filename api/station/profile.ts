@@ -1,12 +1,5 @@
 import { ApiRequest, ApiResponse, getSessionToken, jsonError, methodNotAllowed } from "../_lib/http.js";
-import {
-  assertStationMode,
-  getRecentScans,
-  getStationProfile,
-  getSupabaseForToken,
-  schemaMappingMessage,
-  StationDataError
-} from "../_lib/supabase.js";
+import { getStationProfile, getSupabaseForToken, StationDataError } from "../_lib/supabase.js";
 
 export default async function handler(req: ApiRequest, res: ApiResponse<any>) {
   if (req.method !== "GET") return methodNotAllowed(res);
@@ -17,17 +10,19 @@ export default async function handler(req: ApiRequest, res: ApiResponse<any>) {
   try {
     const client = getSupabaseForToken(token);
     const profile = await getStationProfile(client);
-    assertStationMode(profile, "scanner");
-    const scans = await getRecentScans(client, profile);
-    res.status(200).json({ ok: true, scans });
+    return res.status(200).json({
+      ok: true,
+      operatorName: profile.operatorName,
+      bandName: profile.bandName,
+      stationId: profile.stationId,
+      stationMode: profile.stationMode,
+      redirectPath: profile.stationMode === "band_display" ? "/display" : "/scanner"
+    });
   } catch (error) {
     if (error instanceof StationDataError) {
       const statusCode = error.code === "TOKEN_EXPIRED" ? 401 : error.code === "INVALID_ROLE" || error.code === "INVALID_STATION_MODE" ? 403 : 409;
       return jsonError(res, statusCode, error.code, error.message, error.code === "SUPABASE_QUERY_FAILED");
     }
-    if ((error as Error).message === "SCHEMA_MAPPING_REQUIRED") {
-      return jsonError(res, 501, "SCHEMA_MAPPING_REQUIRED", schemaMappingMessage());
-    }
-    return jsonError(res, 500, "RECENT_FAILED", "No fue posible leer registros recientes.", true);
+    return jsonError(res, 500, "PROFILE_FAILED", "No fue posible leer el perfil.", true);
   }
 }

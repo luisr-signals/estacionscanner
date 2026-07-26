@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
-import { ApiRequest, ApiResponse, jsonError, methodNotAllowed, readString, setSessionCookie } from "../_lib/http.js";
+import { ApiRequest, ApiResponse, jsonError, methodNotAllowed, readString, setSessionCookies } from "../_lib/http.js";
+import { getStationProfile, getSupabaseForToken, StationDataError } from "../_lib/supabase.js";
 
 export default async function handler(req: ApiRequest, res: ApiResponse<any>) {
   if (req.method !== "POST") return methodNotAllowed(res);
@@ -28,11 +29,23 @@ export default async function handler(req: ApiRequest, res: ApiResponse<any>) {
     return jsonError(res, 500, "SESSION_INCOMPATIBLE", "No fue posible guardar la sesion en este dispositivo.", true);
   }
 
-  setSessionCookie(res, data.session.access_token);
-  res.status(200).json({
-    ok: true,
-    operatorName: data.user.email || "Operador",
-    bandName: "Banda pendiente",
-    shiftStatus: "missing"
-  });
+  try {
+    const stationClient = getSupabaseForToken(data.session.access_token);
+    const profile = await getStationProfile(stationClient);
+    setSessionCookies(res, data.session.access_token, data.session.refresh_token, data.session.expires_in ?? 3300);
+    res.status(200).json({
+      ok: true,
+      operatorName: profile.operatorName,
+      bandName: profile.bandName,
+      shiftStatus: "missing",
+      stationMode: profile.stationMode,
+      redirectPath: profile.stationMode === "band_display" ? "/display" : "/scanner"
+    });
+  } catch (error) {
+    if (error instanceof StationDataError) {
+      const statusCode = error.code === "INVALID_ROLE" || error.code === "INVALID_STATION_MODE" ? 403 : 409;
+      return jsonError(res, statusCode, error.code, error.message);
+    }
+    return jsonError(res, 500, "LOGIN_PROFILE_FAILED", "No fue posible validar el perfil de Estacion 337.", true);
+  }
 }

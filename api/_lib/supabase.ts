@@ -4,6 +4,7 @@ const PRODUCTION_USER_ID = "278a5fc3-be3d-460c-ae2c-fa890bfca685";
 const SCANNER_ROLE = "scanner_operator";
 
 type Banda = 1 | 2;
+export type StationMode = "scanner" | "band_display";
 
 export type StationProfile = {
   userId: string;
@@ -12,6 +13,7 @@ export type StationProfile = {
   bandId: Banda;
   bandName: string;
   stationId: string;
+  stationMode: StationMode;
 };
 
 export type StationStatusData = {
@@ -27,6 +29,28 @@ export type StationStatusData = {
   hourGoal: number | null;
   dayTotal: number;
   pendingCount: number;
+};
+
+export type DisplayStatusData = {
+  bandName: string;
+  stationId: string;
+  shiftStatus: "active" | "missing" | "closed";
+  blockStatus: "active" | "break" | "outside_schedule" | "missing";
+  statusTitle: string;
+  statusDetail: string;
+  serverTime: string;
+  blockEndsAt: string | null;
+  nextBlockStartsAt: string | null;
+  hourTotal: number;
+  hourGoal: number | null;
+  hourRemaining: number | null;
+  dayTotal: number;
+  dayGoal: number;
+  dayRemaining: number;
+  expectedTotal: number;
+  delay: number;
+  paceStatus: "on_track" | "ahead" | "behind";
+  paceLabel: string;
 };
 
 export type ScanPayload = {
@@ -76,6 +100,7 @@ type UsuarioRow = {
   rol: string;
   banda_asignada: number | null;
   estacion: string | null;
+  station_mode?: string | null;
 };
 
 type JornadaRow = {
@@ -95,6 +120,7 @@ type RegistroHorarioRow = {
   hora_inicio_bloque: number | string;
   duracion: number | string;
   pares: number | null;
+  orden?: number | null;
 };
 
 type ProductoRow = {
@@ -153,6 +179,7 @@ export class StationDataError extends Error {
       | "INVALID_ROLE"
       | "MISSING_BAND"
       | "MISSING_STATION"
+      | "INVALID_STATION_MODE"
       | "RLS_BLOCKED"
       | "SUPABASE_QUERY_FAILED",
     message: string,
@@ -224,19 +251,24 @@ export async function getStationProfile(client: SupabaseClient): Promise<Station
 
   const { data, error } = await client
     .from("usuarios")
-    .select("id,nombre,correo,rol,banda_asignada,estacion")
+    .select("id,nombre,correo,rol,banda_asignada,estacion,station_mode")
     .eq("id", user.id)
     .maybeSingle();
 
-  if (error) {
-    logStationIssue("usuarios.select", classifySupabaseError(error), {
+  const profileResult =
+    error && error.code === "42703"
+      ? await client.from("usuarios").select("id,nombre,correo,rol,banda_asignada,estacion").eq("id", user.id).maybeSingle()
+      : { data, error };
+
+  if (profileResult.error) {
+    logStationIssue("usuarios.select", classifySupabaseError(profileResult.error), {
       userId: user.id,
-      supabaseCode: error.code ?? null
+      supabaseCode: profileResult.error.code ?? null
     });
-    throw new StationDataError(classifySupabaseError(error), "No fue posible leer el perfil operativo.");
+    throw new StationDataError(classifySupabaseError(profileResult.error), "No fue posible leer el perfil operativo.");
   }
 
-  const profile = data as UsuarioRow | null;
+  const profile = profileResult.data as UsuarioRow | null;
   if (!profile) {
     throw new StationDataError("PROFILE_NOT_FOUND", "No encontramos el perfil operativo de esta cuenta.", {
       userId: user.id
@@ -257,14 +289,29 @@ export async function getStationProfile(client: SupabaseClient): Promise<Station
     throw new StationDataError("MISSING_STATION", "La cuenta no tiene una estacion asignada.", { userId: user.id });
   }
 
+  const stationMode = profile.station_mode == null || profile.station_mode === "" ? "scanner" : profile.station_mode;
+  if (stationMode !== "scanner" && stationMode !== "band_display") {
+    throw new StationDataError("INVALID_STATION_MODE", "El modo de Estacion 337 no es valido.", { userId: user.id });
+  }
+
   return {
     userId: user.id,
     operatorName: profile.nombre,
     role: SCANNER_ROLE,
     bandId: profile.banda_asignada,
     bandName: "Banda " + profile.banda_asignada,
-    stationId: profile.estacion
+    stationId: profile.estacion,
+    stationMode
   };
+}
+
+export function assertStationMode(profile: StationProfile, expected: StationMode) {
+  if (profile.stationMode === expected) return;
+  throw new StationDataError(
+    "INVALID_STATION_MODE",
+    expected === "scanner" ? "Esta cuenta no puede escribir en el scanner." : "Esta cuenta no puede abrir el tablero.",
+    { userId: profile.userId }
+  );
 }
 
 export async function getStationStatus(
@@ -296,7 +343,7 @@ export async function getStationStatus(
 
   const { data: registrosData, error: registrosError } = await client
     .from("registros_horarios")
-    .select("id,hora_inicio_bloque,duracion,pares")
+    .select("id,hora_inicio_bloque,duracion,pares,orden")
     .eq("jornada_id", jornada.id)
     .order("orden", { ascending: true });
 
@@ -329,6 +376,106 @@ export async function getStationStatus(
     hourGoal: currentBlock ? Math.round(Number(currentBlock.duracion) * Number(jornada.meta_por_hora)) : null,
     dayTotal,
     pendingCount: await getPendingConfirmationCount(client, jornada.id, profile.bandId)
+  };
+}
+
+export async function getDisplayStatus(
+  client: SupabaseClient,
+  profile: StationProfile,
+  now = new Date()
+): Promise<DisplayStatusData> {
+  const { data: jornadaData, error: jornadaError } = await client
+    .from("jornadas")
+    .select("*")
+    .eq("usuario_id", PRODUCTION_USER_ID)
+    .eq("banda", profile.bandId)
+    .order("fecha", { ascending: false })
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (jornadaError) {
+    logStationIssue("display.jornadas.select", classifySupabaseError(jornadaError), {
+      userId: profile.userId,
+      supabaseCode: jornadaError.code ?? null
+    });
+    throw new StationDataError(classifySupabaseError(jornadaError), "No fue posible leer la jornada activa.");
+  }
+
+  const base = {
+    bandName: profile.bandName,
+    stationId: profile.stationId,
+    serverTime: mexicoIso(now)
+  };
+  const jornada = jornadaData as JornadaRow | null;
+  if (!jornada) {
+    return {
+      ...base,
+      shiftStatus: "missing",
+      blockStatus: "missing",
+      statusTitle: "Sin jornada activa",
+      statusDetail: "Espera a que DinoCore abra la jornada.",
+      blockEndsAt: null,
+      nextBlockStartsAt: null,
+      hourTotal: 0,
+      hourGoal: null,
+      hourRemaining: null,
+      dayTotal: 0,
+      dayGoal: 0,
+      dayRemaining: 0,
+      expectedTotal: 0,
+      delay: 0,
+      paceStatus: "on_track",
+      paceLabel: "Ritmo estable"
+    };
+  }
+
+  const { data: registrosData, error: registrosError } = await client
+    .from("registros_horarios")
+    .select("id,hora_inicio_bloque,duracion,pares,orden")
+    .eq("jornada_id", jornada.id)
+    .order("orden", { ascending: true });
+
+  if (registrosError) {
+    logStationIssue("display.registros_horarios.select", classifySupabaseError(registrosError), {
+      userId: profile.userId,
+      supabaseCode: registrosError.code ?? null
+    });
+    throw new StationDataError(classifySupabaseError(registrosError), "No fue posible leer los bloques horarios.");
+  }
+
+  const registros = (registrosData ?? []) as RegistroHorarioRow[];
+  const currentBlock = findCurrentBlock(registros, now);
+  const dayTotal = registros.reduce((total, registro) => total + (registro.pares ?? 0), 0);
+  const dayGoal = Math.round(registros.reduce((total, registro) => total + Number(registro.duracion) * Number(jornada.meta_por_hora), 0));
+  const expectedTotal = getExpectedTotal(jornada, registros, now);
+  const delay = Math.max(expectedTotal - dayTotal, 0);
+  const ahead = Math.max(dayTotal - expectedTotal, 0);
+  const isDisabled = Boolean(jornada.deshabilitada);
+  const blockStatus = isDisabled ? "missing" : getBlockStatus(jornada, registros, currentBlock, now);
+  const copy = jornada.estado !== "activa" ? emptyDisplayCopy() : stationStatusCopy(jornada, blockStatus, isDisabled);
+  const nextBlock = currentBlock ? null : findNextBlock(registros, now);
+  const hourGoal = currentBlock ? Math.round(Number(currentBlock.duracion) * Number(jornada.meta_por_hora)) : null;
+  const hourTotal = currentBlock ? currentBlock.pares ?? 0 : 0;
+
+  return {
+    ...base,
+    shiftStatus: jornada.estado === "activa" ? "active" : "closed",
+    blockStatus: jornada.estado === "activa" ? blockStatus : "missing",
+    statusTitle: copy.title,
+    statusDetail: copy.detail,
+    blockEndsAt: currentBlock ? blockBoundaryIso(currentBlock, "end", now) : null,
+    nextBlockStartsAt: nextBlock ? blockBoundaryIso(nextBlock, "start", now) : null,
+    hourTotal,
+    hourGoal,
+    hourRemaining: hourGoal == null ? null : Math.max(hourGoal - hourTotal, 0),
+    dayTotal,
+    dayGoal,
+    dayRemaining: Math.max(dayGoal - dayTotal, 0),
+    expectedTotal,
+    delay,
+    paceStatus: ahead > 0 ? "ahead" : delay > 0 ? "behind" : "on_track",
+    paceLabel: ahead > 0 ? "Adelanto de " + ahead + " pares" : delay > 0 ? "Retraso de " + delay + " pares" : "Ritmo estable"
   };
 }
 
@@ -634,6 +781,103 @@ function stationStatusCopy(
     title: "Fuera del horario de produccion",
     detail: "No existe un bloque habilitado para esta hora. Las horas extra deben estar habilitadas en DinoCore."
   };
+}
+
+function emptyDisplayCopy() {
+  return {
+    title: "Sin jornada activa",
+    detail: "Espera a que DinoCore abra la jornada."
+  };
+}
+
+function getExpectedTotal(jornada: JornadaRow, registros: RegistroHorarioRow[], now = new Date()): number {
+  const hour = mexicoDecimalHour(now);
+  const metaPorHora = Number(jornada.meta_por_hora);
+  const expected = registros.reduce((total, registro) => {
+    const start = Number(registro.hora_inicio_bloque);
+    const duration = Number(registro.duracion);
+    const elapsed = Math.min(Math.max(hour - start, 0), duration);
+    return total + elapsed * metaPorHora;
+  }, 0);
+  return Math.round(expected);
+}
+
+function findNextBlock(registros: RegistroHorarioRow[], now = new Date()): RegistroHorarioRow | null {
+  const hour = mexicoDecimalHour(now);
+  for (const registro of registros) {
+    if (Number(registro.hora_inicio_bloque) > hour) return registro;
+  }
+  return null;
+}
+
+function blockBoundaryIso(registro: RegistroHorarioRow, edge: "start" | "end", now = new Date()): string {
+  const start = Number(registro.hora_inicio_bloque);
+  const decimal = edge === "start" ? start : start + Number(registro.duracion);
+  return mexicoIsoAtDecimalHour(now, decimal);
+}
+
+function mexicoIsoAtDecimalHour(date: Date, decimalHour: number): string {
+  const parts = mexicoDateParts(date);
+  const hour = Math.floor(decimalHour);
+  const minute = Math.floor((decimalHour - hour) * 60);
+  const second = Math.round((((decimalHour - hour) * 60) - minute) * 60);
+  return (
+    parts.year +
+    "-" +
+    pad2(parts.month) +
+    "-" +
+    pad2(parts.day) +
+    "T" +
+    pad2(hour) +
+    ":" +
+    pad2(minute) +
+    ":" +
+    pad2(second) +
+    "-06:00"
+  );
+}
+
+function mexicoIso(date: Date): string {
+  const parts = mexicoDateParts(date);
+  return (
+    parts.year +
+    "-" +
+    pad2(parts.month) +
+    "-" +
+    pad2(parts.day) +
+    "T" +
+    pad2(parts.hour) +
+    ":" +
+    pad2(parts.minute) +
+    ":" +
+    pad2(parts.second) +
+    "-06:00"
+  );
+}
+
+function mexicoDateParts(date: Date) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Mexico_City",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  }).formatToParts(date);
+  return {
+    year: parts.find((part) => part.type === "year")?.value ?? "1970",
+    month: Number(parts.find((part) => part.type === "month")?.value ?? 1),
+    day: Number(parts.find((part) => part.type === "day")?.value ?? 1),
+    hour: Number(parts.find((part) => part.type === "hour")?.value ?? 0),
+    minute: Number(parts.find((part) => part.type === "minute")?.value ?? 0),
+    second: Number(parts.find((part) => part.type === "second")?.value ?? 0)
+  };
+}
+
+function pad2(value: number | string): string {
+  return String(value).padStart(2, "0");
 }
 
 function mexicoDecimalHour(date: Date): number {

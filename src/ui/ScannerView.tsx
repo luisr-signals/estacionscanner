@@ -480,6 +480,8 @@ export function ScannerView({ onLogout }: Props) {
   );
 }
 
+export default ScannerView;
+
 function dotStatus(status: StationStatus | null, online: boolean) {
   if (!online) return "offline";
   if (!status || status.scannerStatus !== "ready") return "paused";

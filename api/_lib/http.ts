@@ -1,7 +1,7 @@
 export type ApiResponse<T> = {
   status: (code: number) => ApiResponse<T>;
   json: (body: T) => void;
-  setHeader: (name: string, value: string) => void;
+  setHeader: (name: string, value: string | string[]) => void;
 };
 
 export type ApiRequest = {
@@ -23,17 +23,26 @@ export function jsonError(res: ApiResponse<any>, status: number, code: string, m
   res.status(status).json({ ok: false, code, message, retryable });
 }
 
-export function setSessionCookie(res: ApiResponse<any>, accessToken: string) {
+export function setSessionCookies(res: ApiResponse<any>, accessToken: string, refreshToken: string, accessMaxAge = 3300) {
   res.setHeader(
     "Set-Cookie",
-    "station_session=" +
-      encodeURIComponent(accessToken) +
-      "; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=28800"
+    [
+      "station_session=" +
+        encodeURIComponent(accessToken) +
+        "; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=" +
+        accessMaxAge,
+      "station_refresh=" +
+        encodeURIComponent(refreshToken) +
+        "; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000"
+    ]
   );
 }
 
-export function clearSessionCookie(res: ApiResponse<any>) {
-  res.setHeader("Set-Cookie", "station_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0");
+export function clearSessionCookies(res: ApiResponse<any>) {
+  res.setHeader("Set-Cookie", [
+    "station_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0",
+    "station_refresh=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0"
+  ]);
 }
 
 export function getSessionToken(req: ApiRequest): string {
@@ -44,4 +53,8 @@ export function getSessionToken(req: ApiRequest): string {
     return authHeader.slice(7);
   }
   return "";
+}
+
+export function getRefreshToken(req: ApiRequest): string {
+  return (req.cookies && req.cookies.station_refresh) || "";
 }

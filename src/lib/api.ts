@@ -1,6 +1,19 @@
 export type LoginResponse =
-  | { ok: true; operatorName: string; bandName: string; shiftStatus: string }
+  | { ok: true; operatorName: string; bandName: string; shiftStatus: string; stationMode: StationMode; redirectPath: string }
   | { ok: false; code: string; message: string };
+
+export type StationMode = "scanner" | "band_display";
+
+export type ProfileResponse =
+  | {
+      ok: true;
+      operatorName: string;
+      bandName: string;
+      stationId: string;
+      stationMode: StationMode;
+      redirectPath: string;
+    }
+  | { ok: false; code: string; message: string; retryable?: boolean };
 
 export type StationStatus = {
   ok: true;
@@ -64,6 +77,29 @@ export type AdjustmentResult =
     }
   | { ok: false; code: string; message: string; retryable?: boolean };
 
+export type DisplayStatus = {
+  ok: true;
+  bandName: string;
+  stationId: string;
+  shiftStatus: "active" | "missing" | "closed";
+  blockStatus: "active" | "break" | "outside_schedule" | "missing";
+  statusTitle: string;
+  statusDetail: string;
+  serverTime: string;
+  blockEndsAt: string | null;
+  nextBlockStartsAt: string | null;
+  hourTotal: number;
+  hourGoal: number | null;
+  hourRemaining: number | null;
+  dayTotal: number;
+  dayGoal: number;
+  dayRemaining: number;
+  expectedTotal: number;
+  delay: number;
+  paceStatus: "on_track" | "ahead" | "behind";
+  paceLabel: string;
+};
+
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
     credentials: "include",
@@ -90,8 +126,24 @@ export function logout() {
   return requestJson<{ ok: boolean }>("/api/station/logout", { method: "POST" });
 }
 
+export function refreshSession() {
+  return requestJson<{ ok: boolean } | { ok: false; code: string; message: string }>("/api/station/refresh", {
+    method: "POST"
+  });
+}
+
+export function getProfile() {
+  return requestJson<ProfileResponse>("/api/station/profile");
+}
+
 export function getStatus() {
   return requestJson<StationStatus | { ok: false; code: string; message: string }>("/api/station/status");
+}
+
+export function getDisplayStatus() {
+  return requestJson<DisplayStatus | { ok: false; code: string; message: string; retryable?: boolean }>(
+    "/api/display/status"
+  );
 }
 
 export function getRecent() {

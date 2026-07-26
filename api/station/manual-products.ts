@@ -1,5 +1,5 @@
 import { ApiRequest, ApiResponse, getSessionToken, jsonError, methodNotAllowed } from "../_lib/http.js";
-import { getManualProducts, getStationProfile, getSupabaseForToken, StationDataError } from "../_lib/supabase.js";
+import { assertStationMode, getManualProducts, getStationProfile, getSupabaseForToken, StationDataError } from "../_lib/supabase.js";
 
 export default async function handler(req: ApiRequest, res: ApiResponse<any>) {
   if (req.method !== "GET") return methodNotAllowed(res);
@@ -10,6 +10,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse<any>) {
   try {
     const client = getSupabaseForToken(token);
     const profile = await getStationProfile(client);
+    assertStationMode(profile, "scanner");
     const products = await getManualProducts(client, profile);
     return res.status(200).json({ ok: true, products });
   } catch (error) {

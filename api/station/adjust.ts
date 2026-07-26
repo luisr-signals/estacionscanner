@@ -1,5 +1,6 @@
 import { ApiRequest, ApiResponse, getSessionToken, jsonError, methodNotAllowed, readString } from "../_lib/http.js";
 import {
+  assertStationMode,
   getStationProfile,
   getSupabaseForToken,
   saveManualAdjustment,
@@ -25,6 +26,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse<any>) {
   try {
     const client = getSupabaseForToken(token);
     const profile = await getStationProfile(client);
+    assertStationMode(profile, "scanner");
     const saved = await saveManualAdjustment(client, { productId, quantity, adjustmentId, profile });
     return res.status(200).json({ ok: true, ...saved, quantity, adjustedAt: saved.scannedAt });
   } catch (error) {

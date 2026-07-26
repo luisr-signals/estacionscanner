@@ -6,6 +6,10 @@ const migration0030 = readFileSync(
   join(process.cwd(), "supabase/migrations/0030_fix_scanner_manual_adjustments.sql"),
   "utf8"
 );
+const migration0031 = readFileSync(
+  join(process.cwd(), "supabase/migrations/0031_add_station_mode_to_usuarios.sql"),
+  "utf8"
+);
 
 describe("scanner manual adjustment migration 0030", () => {
   it("replaces the existing RPC without changing the argument signature", () => {
@@ -43,5 +47,14 @@ describe("scanner manual adjustment migration 0030", () => {
     expect(noBlockIndex).toBeGreaterThan(-1);
     expect(firstCorrectionInsert).toBeGreaterThan(noBlockIndex);
     expect(firstEventInsert).toBeGreaterThan(noBlockIndex);
+  });
+});
+
+describe("station mode migration 0031", () => {
+  it("adds a server-side station mode with a safe scanner default", () => {
+    expect(migration0031).toContain("alter table public.usuarios");
+    expect(migration0031).toContain("add column if not exists station_mode text");
+    expect(migration0031).toContain("not null default 'scanner'");
+    expect(migration0031).toContain("check (station_mode in ('scanner', 'band_display'))");
   });
 });

@@ -70,14 +70,21 @@ export function ScannerView({ onLogout }: Props) {
     getStatus()
       .then((result) => {
         if (!result.ok) {
-          setNotice({ tone: "error", title: "Sesion o estacion no disponible", detail: result.message });
+          setNotice({ tone: result.code === "TOKEN_EXPIRED" ? "offline" : "error", title: statusTitle(result.code), detail: result.message });
           return;
         }
         setStatus(result);
         setTotals({ hourTotal: result.hourTotal, hourGoal: result.hourGoal });
         if (result.shiftStatus !== "active") {
           setScannerState("paused");
-          setNotice({ tone: "offline", title: "Sin jornada activa", detail: "Espera a que DinoCore abra la jornada" });
+          setNotice({
+            tone: "offline",
+            title: result.shiftStatus === "missing" ? "Sin jornada activa" : "Escaner pausado",
+            detail:
+              result.shiftStatus === "missing"
+                ? "Inicia la jornada en DinoCore para comenzar a escanear."
+                : "La banda no esta disponible para escanear."
+          });
         } else if (online && scannerState !== "waiting") {
           setScannerState("ready");
         }
@@ -410,6 +417,15 @@ function labelShift(value: StationStatus["shiftStatus"]) {
   if (value === "active") return "Jornada activa";
   if (value === "paused") return "Escaner pausado";
   return "Sin jornada";
+}
+
+function statusTitle(code: string) {
+  if (code === "TOKEN_EXPIRED") return "Tu sesion vencio";
+  if (code === "PROFILE_NOT_FOUND") return "Perfil operativo no encontrado";
+  if (code === "INVALID_ROLE") return "Cuenta sin permiso";
+  if (code === "MISSING_BAND" || code === "MISSING_STATION") return "Perfil incompleto";
+  if (code === "RLS_BLOCKED") return "Permiso de lectura insuficiente";
+  return "Sesion o estacion no disponible";
 }
 
 function formatClock(value: Date) {

@@ -1,15 +1,17 @@
-import { KeyboardEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { KeyboardEvent, MouseEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
+  getManualProducts,
   getRecent,
   getStatus,
   logout,
+  ManualProduct,
   MovementQuantity,
   RecentScan,
   StationStatus,
   submitAdjustment,
   submitScan
 } from "../lib/api";
-import { canConfirmAdjustment, RecentProduct, recentProductsFromScans } from "../lib/manual";
+import { canConfirmAdjustment, RecentProduct } from "../lib/manual";
 import { canSubmitScan, createScanId, normalizeBarcode, scannerTone, ScannerState } from "../lib/scanner";
 
 type Props = {
@@ -48,8 +50,9 @@ export function ScannerView({ onLogout }: Props) {
   const [manualOpen, setManualOpen] = useState(false);
   const [manualAction, setManualAction] = useState<ManualAction | null>(null);
   const [selectedProduct, setSelectedProduct] = useState<RecentProduct | null>(null);
-
-  const recentProducts = useMemo(() => recentProductsFromScans(recent), [recent]);
+  const [manualProducts, setManualProducts] = useState<ManualProduct[]>([]);
+  const [manualLoading, setManualLoading] = useState(false);
+  const [manualError, setManualError] = useState<string | null>(null);
 
   const focusInput = useCallback(() => {
     if (manualOpen) return;
@@ -211,14 +214,32 @@ export function ScannerView({ onLogout }: Props) {
   }
 
   function openManualPanel() {
-    showNotice({ tone: "offline", title: "Ajustes manuales proximamente", detail: "Esta fase solo habilita escaneos." }, true);
-    focusInput();
+    setManualOpen(true);
+    setManualAction(null);
+    setSelectedProduct(null);
+    setManualError(null);
+    setManualLoading(true);
+    getManualProducts()
+      .then((result) => {
+        if (result.ok) {
+          setManualProducts(result.products);
+        } else {
+          setManualProducts([]);
+          setManualError(result.message);
+        }
+      })
+      .catch(() => {
+        setManualProducts([]);
+        setManualError("No fue posible leer los modelos ajustables.");
+      })
+      .finally(() => setManualLoading(false));
   }
 
   function closeManualPanel() {
     setManualOpen(false);
     setManualAction(null);
     setSelectedProduct(null);
+    setManualError(null);
     focusInput();
   }
 
@@ -237,7 +258,7 @@ export function ScannerView({ onLogout }: Props) {
           showNotice(
             {
               tone: quantity > 0 ? "success" : "error",
-              title: quantity > 0 ? "+1 par registrado" : "-1 par registrado",
+              title: quantity > 0 ? "+1 par agregado manualmente" : "-1 par ajustado",
               detail: result.product
             },
             true
@@ -246,14 +267,13 @@ export function ScannerView({ onLogout }: Props) {
           closeManualPanel();
           refresh();
         } else {
-          showNotice({ tone: "error", title: result.message, detail: result.code }, false);
+          setManualError(result.message);
           playTone("error");
         }
       })
-      .catch(() => showNotice({ tone: "offline", title: "Sin conexion", detail: "No se confirmo el ajuste" }, false))
+      .catch(() => setManualError("Sin conexion. No se confirmo el ajuste."))
       .finally(() => {
         setManualBusy(false);
-        focusInput();
       });
   }
 
@@ -374,10 +394,18 @@ export function ScannerView({ onLogout }: Props) {
 
             <h3>Modelos recientes</h3>
             <div className="manual-products">
-              {recentProducts.length === 0 ? (
-                <p className="empty-recent">No hay modelos recientes para ajustar.</p>
+              {manualLoading ? (
+                <p className="empty-recent">Cargando modelos...</p>
+              ) : manualError ? (
+                <p className="manual-error">{manualError}</p>
+              ) : manualProducts.length === 0 ? (
+                <p className="empty-recent">
+                  Aun no hay modelos registrados en esta jornada.
+                  <br />
+                  Escanea al menos un par para habilitar el ajuste manual.
+                </p>
               ) : (
-                recentProducts.map((product) => (
+                manualProducts.map((product) => (
                   <button
                     className={selectedProduct && selectedProduct.productId === product.productId ? "selected-product" : ""}
                     disabled={manualAction === "remove" && !product.availableToRemove}
@@ -385,27 +413,38 @@ export function ScannerView({ onLogout }: Props) {
                     onClick={() => setSelectedProduct(product)}
                     type="button"
                   >
-                    {product.product}
+                    <strong>{product.product}</strong>
+                    <span>Registrados hoy: {product.count} pares</span>
                   </button>
                 ))
               )}
             </div>
 
             {manualAction && selectedProduct && (
-              <div className="manual-confirmation">
+              <div className={"manual-confirmation confirmation-" + manualAction}>
                 <strong>{manualAction === "add" ? "Agregar 1 par" : "Quitar 1 par"}</strong>
                 <span>{selectedProduct.product}</span>
+                <p>
+                  {manualAction === "add"
+                    ? "Este movimiento se sumara a la jornada activa de " + (status?.bandName ?? "la banda") + "."
+                    : "Este movimiento se descontara mediante la logica administrativa de produccion."}
+                </p>
               </div>
             )}
 
-            <button
-              className="confirm-adjustment-button"
-              disabled={!canConfirmAdjustment(manualAction, selectedProduct, manualBusy)}
-              onClick={confirmAdjustment}
-              type="button"
-            >
-              {manualBusy ? "Guardando..." : "Confirmar ajuste"}
-            </button>
+            <div className="manual-actions">
+              <button className="cancel-adjustment-button" onClick={closeManualPanel} type="button">
+                Cancelar
+              </button>
+              <button
+                className={"confirm-adjustment-button " + (manualAction === "remove" ? "confirm-remove" : "confirm-add")}
+                disabled={!canConfirmAdjustment(manualAction, selectedProduct, manualBusy)}
+                onClick={confirmAdjustment}
+                type="button"
+              >
+                {manualBusy ? "Guardando..." : manualAction === "remove" ? "Confirmar -1" : "Confirmar +1"}
+              </button>
+            </div>
           </div>
         </section>
       )}

@@ -3,6 +3,7 @@ import { RecentScan } from "./api";
 export type RecentProduct = {
   productId: string;
   product: string;
+  count?: number;
   availableToRemove: boolean;
 };
 

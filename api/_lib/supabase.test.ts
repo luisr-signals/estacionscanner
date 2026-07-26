@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { getRecentScans, saveStationScan, StationProfile } from "./supabase";
+import { getManualProducts, getRecentScans, saveManualAdjustment, saveStationScan, StationProfile } from "./supabase";
 
 const profile: StationProfile = {
   userId: "scanner-user",
@@ -155,7 +155,7 @@ describe("station Supabase scanner writes", () => {
         scannedAt: "2026-07-25T23:01:00.000Z",
         quantity: 1,
         status: "saved",
-        availableToRemove: false
+        availableToRemove: true
       },
       {
         id: "event-1",
@@ -164,17 +164,159 @@ describe("station Supabase scanner writes", () => {
         scannedAt: "2026-07-25T23:00:00.000Z",
         quantity: 1,
         status: "saved",
-        availableToRemove: false
+        availableToRemove: true
       }
     ]);
   });
 });
 
-function makeClient({ product: activeProduct, rpc }: { product: typeof product | null; rpc: ReturnType<typeof vi.fn> }) {
+describe("station manual adjustments", () => {
+  it("groups manual products from the active journey", async () => {
+    const client = makeClient({ product, rpc: vi.fn(), duplicateManualEvents: true });
+
+    const products = await getManualProducts(client, profile);
+
+    expect(products).toEqual([
+      {
+        productId: "product-1",
+        product: "Tenis - Negro - Talla 27",
+        count: 2,
+        availableToRemove: true
+      }
+    ]);
+  });
+
+  it("returns an empty manual product list when the journey has no active events", async () => {
+    const client = makeClient({ product, rpc: vi.fn(), manualEvents: [] });
+
+    await expect(getManualProducts(client, profile)).resolves.toEqual([]);
+  });
+
+  it("records a +1 manual adjustment through registrar_ajuste_scanner", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: [
+        {
+          correccion_id: "correction-1",
+          evento_id: "event-manual-1",
+          registro_horario_id: "block-1",
+          pares_bloque: 9,
+          producto_id: "product-1",
+          cantidad: 1,
+          duplicado: false
+        }
+      ],
+      error: null
+    });
+    const client = makeClient({ product, rpc });
+
+    const saved = await saveManualAdjustment(client, {
+      productId: "product-1",
+      quantity: 1,
+      adjustmentId: "77777777-7777-4777-8777-777777777777",
+      profile
+    });
+
+    expect(rpc).toHaveBeenCalledWith("registrar_ajuste_scanner", {
+      p_ajuste_uuid: "77777777-7777-4777-8777-777777777777",
+      p_producto_id: "product-1",
+      p_cantidad: 1
+    });
+    expect(saved).toMatchObject({
+      productId: "product-1",
+      product: "Tenis - Negro - Talla 27",
+      hourTotal: 8,
+      dayTotal: 12,
+      duplicate: false
+    });
+  });
+
+  it("records a -1 manual adjustment without local totals", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: [
+        {
+          correccion_id: "correction-2",
+          evento_id: "event-2",
+          registro_horario_id: "block-1",
+          pares_bloque: 7,
+          producto_id: "product-1",
+          cantidad: -1,
+          duplicado: false
+        }
+      ],
+      error: null
+    });
+    const client = makeClient({ product, rpc });
+
+    const saved = await saveManualAdjustment(client, {
+      productId: "product-1",
+      quantity: -1,
+      adjustmentId: "88888888-8888-4888-8888-888888888888",
+      profile
+    });
+
+    expect(saved.product).toBe("Tenis - Negro - Talla 27");
+    expect(saved.hourTotal).toBe(8);
+    expect(saved.dayTotal).toBe(12);
+  });
+
+  it("keeps duplicate manual adjustment state from the RPC", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: [
+        {
+          correccion_id: "correction-3",
+          evento_id: "event-manual-3",
+          registro_horario_id: "block-1",
+          pares_bloque: 9,
+          producto_id: "product-1",
+          cantidad: 1,
+          duplicado: true
+        }
+      ],
+      error: null
+    });
+    const client = makeClient({ product, rpc });
+
+    const saved = await saveManualAdjustment(client, {
+      productId: "product-1",
+      quantity: 1,
+      adjustmentId: "99999999-9999-4999-8999-999999999999",
+      profile
+    });
+
+    expect(saved.duplicate).toBe(true);
+  });
+
+  it("rejects product ids that were not worked in the active journey", async () => {
+    const rpc = vi.fn();
+    const client = makeClient({ product, rpc, manualEvents: [] });
+
+    await expect(
+      saveManualAdjustment(client, {
+        productId: "other-product",
+        quantity: 1,
+        adjustmentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        profile
+      })
+    ).rejects.toMatchObject({ code: "PRODUCT_NOT_WORKED", status: 409 });
+    expect(rpc).not.toHaveBeenCalled();
+  });
+});
+
+function makeClient({
+  product: activeProduct,
+  rpc,
+  manualEvents,
+  duplicateManualEvents = false
+}: {
+  product: typeof product | null;
+  rpc: ReturnType<typeof vi.fn>;
+  manualEvents?: unknown[];
+  duplicateManualEvents?: boolean;
+}) {
   return {
     rpc,
     from(table: string) {
-      return new FakeQuery(table, activeProduct);
+      return new FakeQuery(table, activeProduct, manualEvents, duplicateManualEvents);
     }
   } as never;
 }
@@ -184,7 +326,9 @@ class FakeQuery {
 
   constructor(
     private table: string,
-    private activeProduct: typeof product | null
+    private activeProduct: typeof product | null,
+    private manualEvents?: unknown[],
+    private duplicateManualEvents = false
   ) {}
 
   select(columns: string) {
@@ -193,6 +337,10 @@ class FakeQuery {
   }
 
   eq() {
+    return this;
+  }
+
+  not() {
     return this;
   }
 
@@ -210,6 +358,13 @@ class FakeQuery {
     if (this.table === "jornadas") return { data: { id: "journey-1", estado: "activa", banda: 1 }, error: null };
     if (this.table === "produccion_eventos" && this.selected === "jornada_id") {
       return { data: { jornada_id: "journey-1" }, error: null };
+    }
+    if (this.table === "produccion_eventos" && this.selected.startsWith("producto_id")) {
+      const event = this.manualEventRows()[0] ?? null;
+      return { data: event, error: null };
+    }
+    if (this.table === "correcciones_produccion") {
+      return { data: { created_at: "2026-07-25T23:02:00.000Z" }, error: null };
     }
     if (this.table === "produccion_eventos") {
       return {
@@ -234,6 +389,10 @@ class FakeQuery {
 
   async then(resolve: (value: { data: unknown[]; error: null }) => void) {
     if (this.table === "produccion_eventos") {
+      if (this.selected.startsWith("id,producto_id")) {
+        resolve({ data: this.manualEventRows(), error: null });
+        return;
+      }
       resolve({
         data: [
           {
@@ -261,6 +420,26 @@ class FakeQuery {
       });
       return;
     }
-    resolve({ data: [{ pares: 8 }, { pares: 4 }], error: null });
+    resolve({
+      data: [
+        { id: "block-1", pares: 8, hora_inicio_bloque: 0, duracion: 24 },
+        { id: "block-2", pares: 4, hora_inicio_bloque: 25, duracion: 1 }
+      ],
+      error: null
+    });
+  }
+
+  private manualEventRows() {
+    if (this.manualEvents) return this.manualEvents;
+    const rows = [
+      {
+        id: "event-1",
+        producto_id: "product-1",
+        estado: "activo",
+        productos: this.activeProduct
+      }
+    ];
+    if (this.duplicateManualEvents) rows.push({ ...rows[0], id: "event-duplicate" });
+    return rows;
   }
 }

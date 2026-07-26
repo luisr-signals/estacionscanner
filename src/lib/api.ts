@@ -40,6 +40,13 @@ export type RecentScan = {
   availableToRemove: boolean;
 };
 
+export type ManualProduct = {
+  productId: string;
+  product: string;
+  count: number;
+  availableToRemove: boolean;
+};
+
 export type AdjustmentResult =
   | {
       ok: true;
@@ -87,6 +94,12 @@ export function getStatus() {
 export function getRecent() {
   return requestJson<{ ok: true; scans: RecentScan[] } | { ok: false; message: string }>(
     "/api/station/recent"
+  );
+}
+
+export function getManualProducts() {
+  return requestJson<{ ok: true; products: ManualProduct[] } | { ok: false; code: string; message: string }>(
+    "/api/station/manual-products"
   );
 }
 

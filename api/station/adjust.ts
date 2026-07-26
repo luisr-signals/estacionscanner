@@ -1,14 +1,11 @@
 import { ApiRequest, ApiResponse, getSessionToken, jsonError, methodNotAllowed, readString } from "../_lib/http.js";
-import { InMemoryIdempotencyStore } from "../_lib/idempotency.js";
 import {
   getStationProfile,
   getSupabaseForToken,
   saveManualAdjustment,
-  SavedScan,
-  schemaMappingMessage
+  StationDataError,
+  StationScanError
 } from "../_lib/supabase.js";
-
-const adjustmentStore = new InMemoryIdempotencyStore<SavedScan>();
 
 export default async function handler(req: ApiRequest, res: ApiResponse<any>) {
   if (req.method !== "POST") return methodNotAllowed(res);
@@ -28,23 +25,15 @@ export default async function handler(req: ApiRequest, res: ApiResponse<any>) {
   try {
     const client = getSupabaseForToken(token);
     const profile = await getStationProfile(client);
-    const previous = adjustmentStore.get(profile.userId, adjustmentId);
-    if (previous) {
-      return res.status(200).json({ ok: true, ...previous.result, duplicate: true, quantity, adjustedAt: previous.result.scannedAt });
-    }
-
     const saved = await saveManualAdjustment(client, { productId, quantity, adjustmentId, profile });
-    adjustmentStore.save(profile.userId, adjustmentId, saved);
-    return res.status(200).json({ ok: true, ...saved, duplicate: false, quantity, adjustedAt: saved.scannedAt });
+    return res.status(200).json({ ok: true, ...saved, quantity, adjustedAt: saved.scannedAt });
   } catch (error) {
-    if ((error as Error).message === "SCHEMA_MAPPING_REQUIRED") {
-      return jsonError(res, 501, "SCHEMA_MAPPING_REQUIRED", schemaMappingMessage());
+    if (error instanceof StationDataError) {
+      const statusCode = error.code === "TOKEN_EXPIRED" ? 401 : error.code === "INVALID_ROLE" ? 403 : 409;
+      return jsonError(res, statusCode, error.code, error.message, error.code === "SUPABASE_QUERY_FAILED");
     }
-    if ((error as Error).message === "REMOVE_NOT_AVAILABLE") {
-      return jsonError(res, 409, "REMOVE_NOT_AVAILABLE", "No hay pares disponibles para quitar.");
-    }
-    if ((error as Error).message === "SHIFT_INACTIVE") {
-      return jsonError(res, 409, "SHIFT_INACTIVE", "No hay jornada activa.");
+    if (error instanceof StationScanError) {
+      return jsonError(res, error.status, error.code, error.message, error.retryable);
     }
     return jsonError(res, 500, "ADJUSTMENT_FAILED", "No fue posible guardar el ajuste.", true);
   }

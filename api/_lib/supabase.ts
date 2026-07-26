@@ -39,6 +39,13 @@ export type ManualAdjustmentPayload = {
   profile: StationProfile;
 };
 
+export type ManualProductData = {
+  productId: string;
+  product: string;
+  count: number;
+  availableToRemove: boolean;
+};
+
 export type SavedScan = {
   productId: string;
   product: string;
@@ -97,12 +104,16 @@ type ProductoRow = {
 
 type ProduccionEventoRow = {
   id: string;
+  cliente_uuid?: string;
   codigo: string;
   hora_registro: string;
   hora_local: string | null;
+  jornada_id?: string;
+  registro_horario_id?: string;
   producto_id: string | null;
   cantidad: 1;
   estado: "activo" | "anulado";
+  origen?: "scanner_pt" | "captura_manual" | "ajuste_manual";
   productos?: ProductoRow | null;
 };
 
@@ -115,6 +126,16 @@ type ScannerRpcRow = {
   registro_horario_id: string;
   pares_bloque: number;
   producto_id: string | null;
+  duplicado: boolean;
+};
+
+type ManualAdjustmentRpcRow = {
+  correccion_id: string;
+  evento_id: string | null;
+  registro_horario_id: string;
+  pares_bloque: number;
+  producto_id: string;
+  cantidad: 1 | -1;
   duplicado: boolean;
 };
 
@@ -141,10 +162,15 @@ export class StationScanError extends Error {
   constructor(
     public code:
       | "INVALID_SCAN_ID"
+      | "INVALID_ADJUSTMENT_ID"
       | "UNKNOWN_BARCODE"
+      | "PRODUCT_NOT_WORKED"
+      | "REMOVE_NOT_AVAILABLE"
       | "SHIFT_INACTIVE"
       | "OUTSIDE_HOUR_BLOCK"
       | "SCAN_PERMISSION_DENIED"
+      | "ADJUSTMENT_NOT_CONFIGURED"
+      | "ADJUSTMENT_FAILED"
       | "SCAN_FAILED",
     message: string,
     public status: number,
@@ -366,10 +392,74 @@ export async function saveStationScan(client: SupabaseClient, payload: ScanPaylo
 }
 
 export async function saveManualAdjustment(
-  _client: SupabaseClient,
-  _payload: ManualAdjustmentPayload
+  client: SupabaseClient,
+  payload: ManualAdjustmentPayload
 ): Promise<SavedScan> {
-  throw new Error("SCHEMA_MAPPING_REQUIRED");
+  const adjustmentId = payload.adjustmentId.trim();
+  if (!isUuid(adjustmentId)) {
+    throw new StationScanError("INVALID_ADJUSTMENT_ID", "Identificador de ajuste invalido.", 400);
+  }
+
+  const product = await findWorkedProductById(client, payload.profile, payload.productId);
+  if (!product) {
+    throw new StationScanError("PRODUCT_NOT_WORKED", "Este modelo no esta disponible para ajustar.", 409);
+  }
+
+  const { data: rpcData, error: rpcError } = await client.rpc("registrar_ajuste_scanner", {
+    p_ajuste_uuid: adjustmentId,
+    p_producto_id: payload.productId,
+    p_cantidad: payload.quantity
+  });
+
+  if (rpcError) {
+    const message = rpcError.message ?? "";
+    logStationIssue("registrar_ajuste_scanner.rpc", rpcError.code ?? "RPC_ERROR", {
+      userId: payload.profile.userId,
+      supabaseCode: rpcError.code ?? null
+    });
+    if (/function .*registrar_ajuste_scanner|schema cache|could not find/i.test(message)) {
+      throw new StationScanError(
+        "ADJUSTMENT_NOT_CONFIGURED",
+        "Falta aplicar la migracion de ajustes manuales en Supabase.",
+        501
+      );
+    }
+    if (rpcError.code === "42501" || /autorizado|permission|permiso/i.test(message)) {
+      throw new StationScanError("SCAN_PERMISSION_DENIED", "Esta cuenta no tiene permiso para ajustar produccion.", 403);
+    }
+    if (/jornada/i.test(message)) {
+      throw new StationScanError("SHIFT_INACTIVE", "La jornada de " + payload.profile.bandName + " no esta disponible.", 409);
+    }
+    if (/bloque|horario/i.test(message)) {
+      throw new StationScanError("OUTSIDE_HOUR_BLOCK", "Fuera de bloque horario.", 409);
+    }
+    if (/disponibles|quitar|cero/i.test(message)) {
+      throw new StationScanError("REMOVE_NOT_AVAILABLE", "No hay pares disponibles para quitar.", 409);
+    }
+    throw new StationScanError("ADJUSTMENT_FAILED", "No fue posible guardar el ajuste.", 500, true);
+  }
+
+  const rpcRow = normalizeManualAdjustmentResult(rpcData);
+  if (!rpcRow) {
+    throw new StationScanError("ADJUSTMENT_FAILED", "La respuesta del ajuste no fue valida.", 500, true);
+  }
+
+  const { data: correctionData } = await client
+    .from("correcciones_produccion")
+    .select("created_at")
+    .eq("id", rpcRow.correccion_id)
+    .maybeSingle();
+  const status = await getStationStatus(client, payload.profile);
+
+  return {
+    productId: product.id,
+    product: formatProduct(product),
+    scannedAt: (correctionData as { created_at?: string } | null)?.created_at ?? new Date().toISOString(),
+    hourTotal: status.hourTotal,
+    hourGoal: status.hourGoal,
+    dayTotal: status.dayTotal,
+    duplicate: rpcRow.duplicado
+  };
 }
 
 export async function getRecentScans(client: SupabaseClient, profile: StationProfile): Promise<RecentScanData[]> {
@@ -378,7 +468,7 @@ export async function getRecentScans(client: SupabaseClient, profile: StationPro
 
   const { data, error } = await client
     .from("produccion_eventos")
-    .select("id,codigo,hora_registro,hora_local,producto_id,cantidad,estado,productos(id,codigo_id,cliente_marca,modelo,color,talla,estado)")
+    .select("id,codigo,hora_registro,hora_local,producto_id,cantidad,estado,origen,productos(id,codigo_id,cliente_marca,modelo,color,talla,estado)")
     .eq("jornada_id", jornada.id)
     .eq("banda", profile.bandId)
     .order("hora_registro", { ascending: false })
@@ -399,11 +489,53 @@ export async function getRecentScans(client: SupabaseClient, profile: StationPro
       productId: event.producto_id ?? "",
       product: event.products ? formatProduct(event.products) : event.codigo,
       scannedAt: event.hora_registro,
-      quantity: 1,
-      status: event.estado === "activo" ? "saved" : "rejected",
-      availableToRemove: false
+      quantity: event.estado === "anulado" ? -1 : 1,
+      status: event.origen === "ajuste_manual" ? "adjusted" : event.estado === "activo" ? "saved" : "rejected",
+      availableToRemove: event.estado === "activo" && Boolean(event.producto_id)
     };
   });
+}
+
+export async function getManualProducts(client: SupabaseClient, profile: StationProfile): Promise<ManualProductData[]> {
+  const jornada = await getActiveJourney(client, profile.bandId);
+  if (!jornada) return [];
+
+  const { data, error } = await client
+    .from("produccion_eventos")
+    .select("id,producto_id,estado,productos(id,codigo_id,cliente_marca,modelo,color,talla,estado)")
+    .eq("jornada_id", jornada.id)
+    .eq("banda", profile.bandId)
+    .eq("estado", "activo")
+    .not("producto_id", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(5000);
+
+  if (error) {
+    logStationIssue("produccion_eventos.manual_products", classifySupabaseError(error), {
+      userId: profile.userId,
+      supabaseCode: error.code ?? null
+    });
+    throw new StationDataError(classifySupabaseError(error), "No fue posible leer los modelos ajustables.");
+  }
+
+  const grouped = new Map<string, ManualProductData>();
+  for (const row of (data ?? []) as unknown[]) {
+    const event = normalizeEvent(row);
+    if (!event.producto_id || !event.products) continue;
+    const existing = grouped.get(event.producto_id);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      grouped.set(event.producto_id, {
+        productId: event.producto_id,
+        product: formatProduct(event.products),
+        count: 1,
+        availableToRemove: true
+      });
+    }
+  }
+
+  return [...grouped.values()];
 }
 
 export function schemaMappingMessage() {
@@ -496,6 +628,34 @@ async function findActiveProductByCode(client: SupabaseClient, barcode: string):
   return aliasProduct && aliasProduct.estado === "activo" ? aliasProduct : null;
 }
 
+async function findWorkedProductById(
+  client: SupabaseClient,
+  profile: StationProfile,
+  productId: string
+): Promise<ProductoRow | null> {
+  const jornada = await getActiveJourney(client, profile.bandId);
+  if (!jornada) {
+    throw new StationScanError("SHIFT_INACTIVE", "La jornada de " + profile.bandName + " no esta disponible.", 409);
+  }
+
+  const { data, error } = await client
+    .from("produccion_eventos")
+    .select("producto_id,productos(id,codigo_id,cliente_marca,modelo,color,talla,estado)")
+    .eq("jornada_id", jornada.id)
+    .eq("banda", profile.bandId)
+    .eq("producto_id", productId)
+    .eq("estado", "activo")
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new StationScanError("ADJUSTMENT_FAILED", "No fue posible validar el modelo.", 500, true);
+  }
+
+  const event = data ? normalizeEvent(data) : null;
+  return event?.products && event.products.estado === "activo" ? event.products : null;
+}
+
 async function getDayTotal(client: SupabaseClient, eventId: string): Promise<number> {
   const { data: event } = await client.from("produccion_eventos").select("jornada_id").eq("id", eventId).maybeSingle();
   const jornadaId = (event as { jornada_id?: string } | null)?.jornada_id;
@@ -526,6 +686,30 @@ function normalizeRpcResult(data: unknown): ScannerRpcRow | null {
     registro_horario_id: record.registro_horario_id,
     pares_bloque: record.pares_bloque,
     producto_id: record.producto_id ?? null,
+    duplicado: Boolean(record.duplicado)
+  };
+}
+
+function normalizeManualAdjustmentResult(data: unknown): ManualAdjustmentRpcRow | null {
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row || typeof row !== "object") return null;
+  const record = row as Partial<ManualAdjustmentRpcRow>;
+  if (
+    !record.correccion_id ||
+    !record.registro_horario_id ||
+    !record.producto_id ||
+    typeof record.pares_bloque !== "number" ||
+    (record.cantidad !== 1 && record.cantidad !== -1)
+  ) {
+    return null;
+  }
+  return {
+    correccion_id: record.correccion_id,
+    evento_id: record.evento_id ?? null,
+    registro_horario_id: record.registro_horario_id,
+    pares_bloque: record.pares_bloque,
+    producto_id: record.producto_id,
+    cantidad: record.cantidad,
     duplicado: Boolean(record.duplicado)
   };
 }

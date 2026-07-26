@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { getManualProducts, getRecentScans, saveManualAdjustment, saveStationScan, StationProfile } from "./supabase";
+import {
+  getManualProducts,
+  getRecentScans,
+  getStationStatus,
+  saveManualAdjustment,
+  saveStationScan,
+  StationProfile
+} from "./supabase";
 
 const profile: StationProfile = {
   userId: "scanner-user",
@@ -170,6 +177,76 @@ describe("station Supabase scanner writes", () => {
   });
 });
 
+describe("station operational status", () => {
+  it("marks the scanner ready only when the current hour is inside a real block", async () => {
+    const client = makeClient({ product, rpc: vi.fn() });
+
+    const status = await getStationStatus(client, profile, mexicoDateAtHour(9));
+
+    expect(status).toMatchObject({
+      shiftStatus: "active",
+      blockStatus: "active",
+      scannerStatus: "ready",
+      statusTitle: "Escaner listo",
+      hourTotal: 8
+    });
+  });
+
+  it("separates active journey from break time", async () => {
+    const client = makeClient({
+      product,
+      rpc: vi.fn(),
+      registros: [
+        { id: "block-1", pares: 8, hora_inicio_bloque: 8, duracion: 2 },
+        { id: "block-2", pares: 4, hora_inicio_bloque: 11, duracion: 2 }
+      ]
+    });
+
+    const status = await getStationStatus(client, profile, mexicoDateAtHour(10.75));
+
+    expect(status).toMatchObject({
+      shiftStatus: "active",
+      blockStatus: "break",
+      scannerStatus: "paused",
+      statusTitle: "Horario de descanso",
+      hourTotal: 0
+    });
+  });
+
+  it("disables production outside schedule even if the journey is active", async () => {
+    const client = makeClient({
+      product,
+      rpc: vi.fn(),
+      registros: [
+        { id: "block-1", pares: 8, hora_inicio_bloque: 8, duracion: 2 },
+        { id: "block-2", pares: 4, hora_inicio_bloque: 11, duracion: 2 }
+      ]
+    });
+
+    const status = await getStationStatus(client, profile, mexicoDateAtHour(23.75));
+
+    expect(status).toMatchObject({
+      shiftStatus: "active",
+      blockStatus: "outside_schedule",
+      scannerStatus: "paused",
+      statusTitle: "Fuera del horario de produccion",
+      hourTotal: 0
+    });
+  });
+
+  it("reports closed journeys without keeping the scanner enabled", async () => {
+    const client = makeClient({ product, rpc: vi.fn(), jornada: { estado: "cerrada" } });
+
+    const status = await getStationStatus(client, profile, mexicoDateAtHour(9));
+
+    expect(status).toMatchObject({
+      shiftStatus: "closed",
+      blockStatus: "missing",
+      scannerStatus: "disabled"
+    });
+  });
+});
+
 describe("station manual adjustments", () => {
   it("groups manual products from the active journey", async () => {
     const client = makeClient({ product, rpc: vi.fn(), duplicateManualEvents: true });
@@ -306,17 +383,21 @@ function makeClient({
   product: activeProduct,
   rpc,
   manualEvents,
-  duplicateManualEvents = false
+  duplicateManualEvents = false,
+  jornada,
+  registros
 }: {
   product: typeof product | null;
   rpc: ReturnType<typeof vi.fn>;
   manualEvents?: unknown[];
   duplicateManualEvents?: boolean;
+  jornada?: Partial<{ id: string; estado: "activa" | "cerrada"; banda: 1; meta_por_hora: number; hora_inicio: number; hora_fin_efectiva: number }>;
+  registros?: unknown[];
 }) {
   return {
     rpc,
     from(table: string) {
-      return new FakeQuery(table, activeProduct, manualEvents, duplicateManualEvents);
+      return new FakeQuery(table, activeProduct, manualEvents, duplicateManualEvents, jornada, registros);
     }
   } as never;
 }
@@ -328,7 +409,9 @@ class FakeQuery {
     private table: string,
     private activeProduct: typeof product | null,
     private manualEvents?: unknown[],
-    private duplicateManualEvents = false
+    private duplicateManualEvents = false,
+    private jornada?: Partial<{ id: string; estado: "activa" | "cerrada"; banda: 1; meta_por_hora: number; hora_inicio: number; hora_fin_efectiva: number }>,
+    private registros?: unknown[]
   ) {}
 
   select(columns: string) {
@@ -355,7 +438,20 @@ class FakeQuery {
   async maybeSingle() {
     if (this.table === "productos") return { data: this.activeProduct, error: null };
     if (this.table === "productos_codigos_alias") return { data: null, error: null };
-    if (this.table === "jornadas") return { data: { id: "journey-1", estado: "activa", banda: 1 }, error: null };
+    if (this.table === "jornadas") {
+      return {
+        data: {
+          id: "journey-1",
+          estado: "activa",
+          banda: 1,
+          meta_por_hora: 10,
+          hora_inicio: 8,
+          hora_fin_efectiva: 17,
+          ...this.jornada
+        },
+        error: null
+      };
+    }
     if (this.table === "produccion_eventos" && this.selected === "jornada_id") {
       return { data: { jornada_id: "journey-1" }, error: null };
     }
@@ -420,13 +516,7 @@ class FakeQuery {
       });
       return;
     }
-    resolve({
-      data: [
-        { id: "block-1", pares: 8, hora_inicio_bloque: 0, duracion: 24 },
-        { id: "block-2", pares: 4, hora_inicio_bloque: 25, duracion: 1 }
-      ],
-      error: null
-    });
+    resolve({ data: this.registros ?? defaultRegistros(), error: null });
   }
 
   private manualEventRows() {
@@ -442,4 +532,17 @@ class FakeQuery {
     if (this.duplicateManualEvents) rows.push({ ...rows[0], id: "event-duplicate" });
     return rows;
   }
+}
+
+function defaultRegistros() {
+  return [
+    { id: "block-1", pares: 8, hora_inicio_bloque: 0, duracion: 24 },
+    { id: "block-2", pares: 4, hora_inicio_bloque: 25, duracion: 1 }
+  ];
+}
+
+function mexicoDateAtHour(hour: number) {
+  const wholeHour = Math.floor(hour);
+  const minutes = Math.round((hour - wholeHour) * 60);
+  return new Date(Date.UTC(2026, 6, 25, wholeHour + 6, minutes, 0));
 }

@@ -10,7 +10,7 @@ export function canSubmitScan(value: string, isBusy: boolean, isOnline: boolean)
 
 export function createScanId(now = new Date()): string {
   const bytes = new Uint8Array(16);
-  const cryptoSource = globalThis.crypto;
+  const cryptoSource = getCryptoSource();
   if (cryptoSource && cryptoSource.getRandomValues) {
     cryptoSource.getRandomValues(bytes);
   } else {
@@ -47,4 +47,22 @@ function formatUuid(bytes: Uint8Array, _now: Date): string {
     "-" +
     hex.slice(10, 16).join("")
   );
+}
+
+function getCryptoSource(): Crypto | null {
+  if (
+    typeof window !== "undefined" &&
+    window.crypto &&
+    typeof window.crypto.getRandomValues === "function"
+  ) {
+    return window.crypto;
+  }
+  if (
+    typeof globalThis !== "undefined" &&
+    globalThis.crypto &&
+    typeof globalThis.crypto.getRandomValues === "function"
+  ) {
+    return globalThis.crypto;
+  }
+  return null;
 }

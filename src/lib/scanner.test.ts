@@ -22,6 +22,20 @@ describe("scanner capture helpers", () => {
     expect(first).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   });
 
+  it("uses window.crypto.getRandomValues when available for Safari-compatible UUIDs", () => {
+    const getRandomValues = vi.fn((bytes: Uint8Array) => {
+      for (let index = 0; index < bytes.length; index += 1) bytes[index] = index + 1;
+      return bytes;
+    });
+    vi.stubGlobal("window", { crypto: { getRandomValues } });
+
+    const id = createScanId();
+
+    expect(getRandomValues).toHaveBeenCalled();
+    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    vi.unstubAllGlobals();
+  });
+
   it("only defines sounds for confirmed success and server rejection", () => {
     expect(scannerTone("success")).toEqual({ frequency: 880, durationMs: 80 });
     expect(scannerTone("error")).toEqual({ frequency: 220, durationMs: 160 });

@@ -18,8 +18,11 @@ export type StationStatusData = {
   operatorName: string;
   bandName: string;
   stationId: string;
-  shiftStatus: "active" | "missing" | "paused";
-  scannerStatus: "ready" | "paused" | "offline";
+  shiftStatus: "active" | "missing" | "closed";
+  blockStatus: "active" | "break" | "outside_schedule" | "missing";
+  scannerStatus: "ready" | "paused" | "disabled";
+  statusTitle: string;
+  statusDetail: string;
   hourTotal: number;
   hourGoal: number | null;
   dayTotal: number;
@@ -80,6 +83,8 @@ type JornadaRow = {
   fecha: string;
   estado: "activa" | "cerrada";
   banda: Banda;
+  hora_inicio?: number | string;
+  hora_fin_efectiva?: number | string;
   meta_por_hora: number | string;
   deshabilitada?: boolean | null;
   motivo_deshabilitada?: string | null;
@@ -166,6 +171,10 @@ export class StationScanError extends Error {
       | "UNKNOWN_BARCODE"
       | "PRODUCT_NOT_WORKED"
       | "REMOVE_NOT_AVAILABLE"
+      | "NO_ACTIVE_SHIFT"
+      | "NO_ACTIVE_BLOCK"
+      | "BREAK_TIME"
+      | "OUTSIDE_SCHEDULE"
       | "SHIFT_INACTIVE"
       | "OUTSIDE_HOUR_BLOCK"
       | "SCAN_PERMISSION_DENIED"
@@ -258,13 +267,16 @@ export async function getStationProfile(client: SupabaseClient): Promise<Station
   };
 }
 
-export async function getStationStatus(client: SupabaseClient, profile: StationProfile): Promise<StationStatusData> {
+export async function getStationStatus(
+  client: SupabaseClient,
+  profile: StationProfile,
+  now = new Date()
+): Promise<StationStatusData> {
   const { data: jornadaData, error: jornadaError } = await client
     .from("jornadas")
     .select("*")
     .eq("usuario_id", PRODUCTION_USER_ID)
     .eq("banda", profile.bandId)
-    .eq("estado", "activa")
     .order("fecha", { ascending: false })
     .order("created_at", { ascending: false })
     .limit(1)
@@ -279,19 +291,8 @@ export async function getStationStatus(client: SupabaseClient, profile: StationP
   }
 
   const jornada = jornadaData as JornadaRow | null;
-  if (!jornada) {
-    return {
-      operatorName: profile.operatorName,
-      bandName: profile.bandName,
-      stationId: profile.stationId,
-      shiftStatus: "missing",
-      scannerStatus: "paused",
-      hourTotal: 0,
-      hourGoal: null,
-      dayTotal: 0,
-      pendingCount: 0
-    };
-  }
+  if (!jornada) return emptyStationStatus(profile, "missing");
+  if (jornada.estado !== "activa") return emptyStationStatus(profile, "closed");
 
   const { data: registrosData, error: registrosError } = await client
     .from("registros_horarios")
@@ -308,16 +309,22 @@ export async function getStationStatus(client: SupabaseClient, profile: StationP
   }
 
   const registros = (registrosData ?? []) as RegistroHorarioRow[];
-  const currentBlock = findCurrentBlock(registros);
+  const currentBlock = findCurrentBlock(registros, now);
   const dayTotal = registros.reduce((total, registro) => total + (registro.pares ?? 0), 0);
   const isDisabled = Boolean(jornada.deshabilitada);
+  const blockStatus = isDisabled ? "missing" : getBlockStatus(jornada, registros, currentBlock, now);
+  const scannerStatus = !isDisabled && blockStatus === "active" ? "ready" : "paused";
+  const copy = stationStatusCopy(jornada, blockStatus, isDisabled);
 
   return {
     operatorName: profile.operatorName,
     bandName: profile.bandName,
     stationId: profile.stationId,
-    shiftStatus: isDisabled ? "paused" : "active",
-    scannerStatus: !isDisabled && currentBlock ? "ready" : "paused",
+    shiftStatus: "active",
+    blockStatus,
+    scannerStatus,
+    statusTitle: copy.title,
+    statusDetail: copy.detail,
     hourTotal: currentBlock ? currentBlock.pares ?? 0 : 0,
     hourGoal: currentBlock ? Math.round(Number(currentBlock.duracion) * Number(jornada.meta_por_hora)) : null,
     dayTotal,
@@ -332,6 +339,7 @@ export async function saveStationScan(client: SupabaseClient, payload: ScanPaylo
   }
 
   const barcode = payload.barcode.trim();
+  await assertScannerReady(client, payload.profile);
   const product = await findActiveProductByCode(client, barcode);
   if (!product) {
     throw new StationScanError("UNKNOWN_BARCODE", "Codigo no reconocido", 404);
@@ -400,6 +408,7 @@ export async function saveManualAdjustment(
     throw new StationScanError("INVALID_ADJUSTMENT_ID", "Identificador de ajuste invalido.", 400);
   }
 
+  await assertScannerReady(client, payload.profile);
   const product = await findWorkedProductById(client, payload.profile, payload.productId);
   if (!product) {
     throw new StationScanError("PRODUCT_NOT_WORKED", "Este modelo no esta disponible para ajustar.", 409);
@@ -552,6 +561,75 @@ function findCurrentBlock(registros: RegistroHorarioRow[], now = new Date()): Re
   return null;
 }
 
+function emptyStationStatus(profile: StationProfile, shiftStatus: "missing" | "closed"): StationStatusData {
+  return {
+    operatorName: profile.operatorName,
+    bandName: profile.bandName,
+    stationId: profile.stationId,
+    shiftStatus,
+    blockStatus: "missing",
+    scannerStatus: "disabled",
+    statusTitle: "Sin jornada activa",
+    statusDetail: "Espera a que DinoCore abra la jornada.",
+    hourTotal: 0,
+    hourGoal: null,
+    dayTotal: 0,
+    pendingCount: 0
+  };
+}
+
+function getBlockStatus(
+  jornada: JornadaRow,
+  registros: RegistroHorarioRow[],
+  currentBlock: RegistroHorarioRow | null,
+  now = new Date()
+): StationStatusData["blockStatus"] {
+  if (currentBlock) return "active";
+  if (registros.length === 0) return "missing";
+
+  const hour = mexicoDecimalHour(now);
+  const firstBlockStart = Math.min(...registros.map((registro) => Number(registro.hora_inicio_bloque)));
+  const lastBlockEnd = Math.max(
+    ...registros.map((registro) => Number(registro.hora_inicio_bloque) + Number(registro.duracion))
+  );
+  const shiftStart = jornada.hora_inicio == null ? firstBlockStart : Number(jornada.hora_inicio);
+  const shiftEnd = jornada.hora_fin_efectiva == null ? lastBlockEnd : Number(jornada.hora_fin_efectiva);
+
+  if (hour >= firstBlockStart && hour <= lastBlockEnd) return "break";
+  if (hour >= shiftStart && hour <= shiftEnd) return "outside_schedule";
+  return "outside_schedule";
+}
+
+function stationStatusCopy(
+  jornada: JornadaRow,
+  blockStatus: StationStatusData["blockStatus"],
+  isDisabled: boolean
+): { title: string; detail: string } {
+  if (isDisabled) {
+    return {
+      title: "Escaner pausado",
+      detail: jornada.motivo_deshabilitada || "La banda no esta disponible para escanear."
+    };
+  }
+  if (blockStatus === "active") return { title: "Escaner listo", detail: "Listo para registrar produccion." };
+  if (blockStatus === "break") {
+    return {
+      title: "Horario de descanso",
+      detail: "El registro se reanudara al comenzar el siguiente bloque."
+    };
+  }
+  if (blockStatus === "missing") {
+    return {
+      title: "Sin bloque horario",
+      detail: "DinoCore no tiene bloques habilitados para esta jornada."
+    };
+  }
+  return {
+    title: "Fuera del horario de produccion",
+    detail: "No existe un bloque habilitado para esta hora. Las horas extra deben estar habilitadas en DinoCore."
+  };
+}
+
 function mexicoDecimalHour(date: Date): number {
   const parts = new Intl.DateTimeFormat("es-MX", {
     timeZone: "America/Mexico_City",
@@ -626,6 +704,21 @@ async function findActiveProductByCode(client: SupabaseClient, barcode: string):
   const aliasProductRaw = (alias as { productos?: ProductoRow | ProductoRow[] | null } | null)?.productos ?? null;
   const aliasProduct = Array.isArray(aliasProductRaw) ? aliasProductRaw[0] ?? null : aliasProductRaw;
   return aliasProduct && aliasProduct.estado === "activo" ? aliasProduct : null;
+}
+
+async function assertScannerReady(client: SupabaseClient, profile: StationProfile): Promise<void> {
+  const status = await getStationStatus(client, profile);
+  if (status.shiftStatus !== "active") {
+    throw new StationScanError("NO_ACTIVE_SHIFT", "No hay jornada activa.", 409);
+  }
+  if (status.blockStatus === "active" && status.scannerStatus === "ready") return;
+  if (status.blockStatus === "break") {
+    throw new StationScanError("BREAK_TIME", "Horario de descanso.", 409);
+  }
+  if (status.blockStatus === "outside_schedule") {
+    throw new StationScanError("OUTSIDE_SCHEDULE", "Fuera del horario de produccion.", 409);
+  }
+  throw new StationScanError("NO_ACTIVE_BLOCK", "No existe un bloque habilitado para esta hora.", 409);
 }
 
 async function findWorkedProductById(

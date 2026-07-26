@@ -7,8 +7,11 @@ export type StationStatus = {
   operatorName: string;
   bandName: string;
   stationId: string;
-  shiftStatus: "active" | "missing" | "paused";
-  scannerStatus: "ready" | "paused" | "offline";
+  shiftStatus: "active" | "missing" | "closed";
+  blockStatus: "active" | "break" | "outside_schedule" | "missing";
+  scannerStatus: "ready" | "paused" | "disabled";
+  statusTitle: string;
+  statusDetail: string;
   hourTotal: number;
   hourGoal: number | null;
   dayTotal: number;

@@ -78,15 +78,12 @@ export function ScannerView({ onLogout }: Props) {
         }
         setStatus(result);
         setTotals({ hourTotal: result.hourTotal, hourGoal: result.hourGoal });
-        if (result.shiftStatus !== "active") {
+        if (result.scannerStatus !== "ready") {
           setScannerState("paused");
           setNotice({
             tone: "offline",
-            title: result.shiftStatus === "missing" ? "Sin jornada activa" : "Escaner pausado",
-            detail:
-              result.shiftStatus === "missing"
-                ? "Inicia la jornada en DinoCore para comenzar a escanear."
-                : "La banda no esta disponible para escanear."
+            title: result.statusTitle,
+            detail: result.statusDetail
           });
         } else if (online && scannerState !== "waiting") {
           setScannerState("ready");
@@ -160,6 +157,18 @@ export function ScannerView({ onLogout }: Props) {
 
   function processScan() {
     if (busyRef.current) return;
+    if (!status || status.scannerStatus !== "ready") {
+      showNotice(
+        {
+          tone: "offline",
+          title: status?.statusTitle ?? "Escaner no disponible",
+          detail: status?.statusDetail ?? "Espera a que DinoCore habilite la jornada."
+        },
+        false
+      );
+      focusInput();
+      return;
+    }
     if (!canSubmitScan(barcode, busy, online)) {
       if (!online) showNotice({ tone: "offline", title: "Sin conexion", detail: "Reintenta cuando vuelva la red" }, false);
       focusInput();
@@ -191,11 +200,12 @@ export function ScannerView({ onLogout }: Props) {
           refresh();
         } else {
           setScannerState("error");
+          const friendly = scanErrorCopy(result.code, result.message);
           showNotice(
             {
               tone: "error",
-              title: result.message,
-              detail: result.code === "UNKNOWN_BARCODE" ? "Revisa la etiqueta e intenta nuevamente." : result.code
+              title: friendly.title,
+              detail: friendly.detail
             },
             false
           );
@@ -214,6 +224,18 @@ export function ScannerView({ onLogout }: Props) {
   }
 
   function openManualPanel() {
+    if (!status || status.scannerStatus !== "ready") {
+      showNotice(
+        {
+          tone: "offline",
+          title: status?.statusTitle ?? "Escaner no disponible",
+          detail: status?.statusDetail ?? "Espera a que DinoCore habilite la jornada."
+        },
+        false
+      );
+      focusInput();
+      return;
+    }
     setManualOpen(true);
     setManualAction(null);
     setSelectedProduct(null);
@@ -267,7 +289,7 @@ export function ScannerView({ onLogout }: Props) {
           closeManualPanel();
           refresh();
         } else {
-          setManualError(result.message);
+          setManualError(adjustmentErrorMessage(result.code, result.message));
           playTone("error");
         }
       })
@@ -312,7 +334,7 @@ export function ScannerView({ onLogout }: Props) {
             autoComplete="off"
             autoCorrect="off"
             autoFocus
-            disabled={busy || scannerState === "paused"}
+            disabled={busy || scannerState === "paused" || status?.scannerStatus !== "ready"}
             id="barcode"
             inputMode="none"
             onBlur={focusInput}
@@ -339,7 +361,13 @@ export function ScannerView({ onLogout }: Props) {
       <section className="recent-card">
         <div className="recent-heading">
           <h2>Ultimos escaneos</h2>
-          <button className="manual-button" onClick={openManualPanel} type="button" aria-label="Ajuste manual">
+          <button
+            className="manual-button"
+            disabled={!status || status.scannerStatus !== "ready"}
+            onClick={openManualPanel}
+            type="button"
+            aria-label="Ajuste manual"
+          >
             ±
           </button>
         </div>
@@ -454,13 +482,13 @@ export function ScannerView({ onLogout }: Props) {
 
 function dotStatus(status: StationStatus | null, online: boolean) {
   if (!online) return "offline";
-  if (!status || status.shiftStatus !== "active") return "paused";
+  if (!status || status.scannerStatus !== "ready") return "paused";
   return "active";
 }
 
 function labelShift(value: StationStatus["shiftStatus"]) {
   if (value === "active") return "Jornada activa";
-  if (value === "paused") return "Escaner pausado";
+  if (value === "closed") return "Sin jornada";
   return "Sin jornada";
 }
 
@@ -471,6 +499,38 @@ function statusTitle(code: string) {
   if (code === "MISSING_BAND" || code === "MISSING_STATION") return "Perfil incompleto";
   if (code === "RLS_BLOCKED") return "Permiso de lectura insuficiente";
   return "Sesion o estacion no disponible";
+}
+
+function scanErrorCopy(code: string, message: string) {
+  if (code === "INVALID_SCAN_ID") {
+    return { title: "No fue posible preparar el escaneo", detail: "Intenta nuevamente." };
+  }
+  if (code === "UNKNOWN_BARCODE") {
+    return { title: "Codigo no reconocido", detail: "No se registro ningun par." };
+  }
+  if (code === "NO_ACTIVE_SHIFT" || code === "SHIFT_INACTIVE") {
+    return { title: "No hay jornada activa", detail: "Espera a que DinoCore abra la jornada." };
+  }
+  if (code === "BREAK_TIME") {
+    return { title: "Horario de descanso", detail: "El registro se reanudara al comenzar el siguiente bloque." };
+  }
+  if (code === "NO_ACTIVE_BLOCK" || code === "OUTSIDE_HOUR_BLOCK") {
+    return { title: "Sin bloque horario", detail: "No existe un bloque habilitado para esta hora." };
+  }
+  if (code === "OUTSIDE_SCHEDULE") {
+    return { title: "Fuera del horario de produccion", detail: "No existe un bloque habilitado para esta hora." };
+  }
+  return { title: message, detail: "El registro no fue confirmado." };
+}
+
+function adjustmentErrorMessage(code: string, message: string) {
+  if (code === "INVALID_ADJUSTMENT_ID") return "No fue posible preparar el ajuste. Intenta nuevamente.";
+  if (code === "NO_ACTIVE_SHIFT" || code === "SHIFT_INACTIVE") return "No hay jornada activa.";
+  if (code === "BREAK_TIME") return "Horario de descanso.";
+  if (code === "NO_ACTIVE_BLOCK" || code === "OUTSIDE_HOUR_BLOCK") return "No existe un bloque habilitado para esta hora.";
+  if (code === "OUTSIDE_SCHEDULE") return "Fuera del horario de produccion.";
+  if (code === "REMOVE_NOT_AVAILABLE") return "No hay pares disponibles para quitar.";
+  return message;
 }
 
 function formatClock(value: Date) {

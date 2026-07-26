@@ -284,6 +284,12 @@ describe("station display mode", () => {
       dayGoal: 213,
       expectedTotal: 107,
       delay: 63,
+      ahead: 0,
+      productiveSecondsRemaining: 5400,
+      currentAveragePerMinute: 0.49,
+      idealAveragePerMinute: 1.88,
+      projectedResult: 88,
+      projectedCompliance: 41,
       paceStatus: "behind"
     });
   });
@@ -307,7 +313,12 @@ describe("station display mode", () => {
       hourTotal: 0,
       hourGoal: null,
       dayTotal: 50,
-      dayGoal: 100
+      dayGoal: 100,
+      productiveSecondsRemaining: 3600,
+      currentAveragePerMinute: 0.83,
+      idealAveragePerMinute: 0.83,
+      projectedResult: 100,
+      projectedCompliance: 100
     });
     expect(status.nextBlockStartsAt).toContain("T11:00:00-06:00");
   });

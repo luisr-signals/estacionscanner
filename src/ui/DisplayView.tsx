@@ -15,7 +15,6 @@ export function DisplayView({ onLogout }: Props) {
   const [clock, setClock] = useState(new Date());
   const [offline, setOffline] = useState(false);
   const [lastUpdate, setLastUpdate] = useState<string | null>(null);
-  const blockEndsAt = status?.blockEndsAt ?? null;
   const blockStatus = status?.blockStatus ?? null;
 
   const refresh = useCallback(() => {
@@ -72,28 +71,27 @@ export function DisplayView({ onLogout }: Props) {
   }, [blockStatus, refresh]);
 
   useEffect(() => {
-    if (!blockEndsAt) return;
-    if (remainingSeconds(blockEndsAt, clock) <= 0) refresh();
-  }, [blockEndsAt, clock, refresh]);
+    if (!status) return;
+    if (status.productiveSecondsRemaining > 0 && productiveSecondsLeft(status, clock) <= 0 && status.shiftStatus === "active") {
+      refresh();
+    }
+  }, [clock, refresh, status]);
 
   function handleLogout() {
+    if (!window.confirm("Cerrar sesion?")) return;
     logout().finally(onLogout);
   }
 
-  const blockCountdown = status?.blockEndsAt ? formatDuration(remainingSeconds(status.blockEndsAt, clock)) : null;
   const progress = status && status.hourGoal && status.hourGoal > 0 ? Math.min(status.hourTotal / status.hourGoal, 1) : 0;
+  const shiftCountdown = status ? formatDuration(productiveSecondsLeft(status, clock)) : "--:--:--";
 
   return (
     <main className="display-page">
       <header className="display-header">
-        <div>
+        <button className="display-band-button" onClick={handleLogout} type="button">
           <strong>{status?.bandName.toUpperCase() ?? "BANDA"}</strong>
           <span className={"activity-dot " + (status?.shiftStatus === "active" && !offline ? "dot-active" : "dot-paused")} />
           <p>{status?.shiftStatus === "active" ? "Jornada activa" : "Sin jornada activa"}</p>
-        </div>
-        <time>{formatClock(clock)}</time>
-        <button className="logout-button" onClick={handleLogout} type="button">
-          Cerrar sesion
         </button>
       </header>
 
@@ -123,40 +121,64 @@ export function DisplayView({ onLogout }: Props) {
         </section>
       ) : (
         <>
-          <section className="display-status">
-            <strong>{displayTitle(status)}</strong>
-            <span>{displayDetail(status)}</span>
+          <section className="display-hero-grid">
+            <article className="display-hero-card">
+              <span>TIEMPO RESTANTE DE LA JORNADA</span>
+              <strong>{shiftCountdown}</strong>
+            </article>
+            <article className="display-hero-card">
+              <span>PARES ESTA HORA</span>
+              <strong>{status.blockStatus === "active" ? status.hourTotal : "-"}</strong>
+              <progress max={1} value={progress} />
+              <p>
+                {status.blockStatus === "active" && status.hourGoal != null
+                  ? status.hourTotal + " / " + status.hourGoal + " · META DE LA HORA"
+                  : displayDetail(status)}
+              </p>
+            </article>
           </section>
 
-          <section className="display-grid">
-            <Metric title="PARES ESTA HORA" value={status.blockStatus === "active" ? status.hourTotal : "-"} />
-            <Metric title="META DE LA HORA" value={status.hourGoal ?? "-"} />
-            <Metric title="FALTAN" value={status.hourRemaining ?? "-"} tone={status.hourRemaining === 0 ? "good" : "warn"}/>
-            <Metric title="TERMINA EN" value={blockCountdown ?? "--:--:--"} compact />
+          <section className="display-secondary-grid">
+            <Metric title="PARES FALTANTES" value={status.hourRemaining ?? 0} tone="warn" />
+            <Metric title="PARES DE ATRASO" value={status.delay} tone="bad" />
+            <Metric title="PARES ADELANTADOS" value={status.ahead} tone="good" />
           </section>
 
-          <section className="progress-band">
-            <progress max={1} value={progress} />
-            <span>
-              {status.blockStatus === "active" && status.hourGoal != null
-                ? status.hourTotal + " / " + status.hourGoal
-                : "Sin bloque activo"}
-            </span>
-          </section>
-
-          <section className="display-footer">
-            <Metric title="TOTAL DEL DIA" value={status.dayTotal} />
-            <Metric title="META DEL DIA" value={status.dayGoal} />
-            <Metric title="FALTAN DEL DIA" value={status.dayRemaining} />
-            <Metric title="RETRASO ACUMULADO" value={status.delay} tone={status.delay > 0 ? "bad" : "good"} />
-          </section>
-
-          <section className={"pace-strip pace-" + status.paceStatus}>
-            {status.paceLabel}
+          <section className="display-bottom-bar">
+            <BottomMetric title="TOTAL DEL DIA" value={status.dayTotal} />
+            <BottomMetric title="META DEL DIA" value={status.dayGoal} />
+            <BottomMetric
+              title="PROM. ACTUAL / MIN"
+              value={formatRate(status.currentAveragePerMinute)}
+              subvalue={"IDEAL: " + formatRate(status.idealAveragePerMinute) + " / MIN"}
+              subtleDanger
+            />
+            <BottomMetric title="RESULTADO PROYECTADO" value={status.projectedResult} />
+            <BottomMetric title="CUMPLIMIENTO" value={status.projectedCompliance == null ? "-" : status.projectedCompliance + "%"} />
           </section>
         </>
       )}
     </main>
+  );
+}
+
+function BottomMetric({
+  title,
+  value,
+  subvalue,
+  subtleDanger
+}: {
+  title: string;
+  value: number | string;
+  subvalue?: string;
+  subtleDanger?: boolean;
+}) {
+  return (
+    <article className="display-bottom-metric">
+      <span>{title}</span>
+      <strong>{value}</strong>
+      {subvalue && <small className={subtleDanger ? "subtle-danger" : ""}>{subvalue}</small>}
+    </article>
   );
 }
 
@@ -179,13 +201,6 @@ function Metric({
   );
 }
 
-function displayTitle(status: DisplayStatus) {
-  if (status.blockStatus === "active") return "BLOQUE ACTIVO";
-  if (status.blockStatus === "break") return "HORARIO DE DESCANSO";
-  if (status.blockStatus === "outside_schedule") return "JORNADA ABIERTA";
-  return status.statusTitle.toUpperCase();
-}
-
 function displayDetail(status: DisplayStatus) {
   if (status.blockStatus === "break" && status.nextBlockStartsAt) {
     return "Proximo bloque: " + formatClock(new Date(status.nextBlockStartsAt));
@@ -194,8 +209,10 @@ function displayDetail(status: DisplayStatus) {
   return status.statusDetail;
 }
 
-function remainingSeconds(target: string, now: Date) {
-  return Math.max(Math.floor((new Date(target).getTime() - now.getTime()) / 1000), 0);
+function productiveSecondsLeft(status: DisplayStatus, now: Date) {
+  const serverTime = new Date(status.serverTime).getTime();
+  const elapsed = Math.max(Math.floor((now.getTime() - serverTime) / 1000), 0);
+  return Math.max(status.productiveSecondsRemaining - elapsed, 0);
 }
 
 function formatDuration(totalSeconds: number) {
@@ -213,6 +230,10 @@ function formatClock(value: Date) {
     hour12: true,
     timeZone: "America/Mexico_City"
   });
+}
+
+function formatRate(value: number) {
+  return value.toFixed(2);
 }
 
 function pad2(value: number) {

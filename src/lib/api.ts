@@ -96,6 +96,12 @@ export type DisplayStatus = {
   dayRemaining: number;
   expectedTotal: number;
   delay: number;
+  ahead: number;
+  productiveSecondsRemaining: number;
+  currentAveragePerMinute: number;
+  idealAveragePerMinute: number;
+  projectedResult: number;
+  projectedCompliance: number | null;
   paceStatus: "on_track" | "ahead" | "behind";
   paceLabel: string;
 };

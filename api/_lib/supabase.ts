@@ -49,6 +49,12 @@ export type DisplayStatusData = {
   dayRemaining: number;
   expectedTotal: number;
   delay: number;
+  ahead: number;
+  productiveSecondsRemaining: number;
+  currentAveragePerMinute: number;
+  idealAveragePerMinute: number;
+  projectedResult: number;
+  projectedCompliance: number | null;
   paceStatus: "on_track" | "ahead" | "behind";
   paceLabel: string;
 };
@@ -425,6 +431,12 @@ export async function getDisplayStatus(
       dayRemaining: 0,
       expectedTotal: 0,
       delay: 0,
+      ahead: 0,
+      productiveSecondsRemaining: 0,
+      currentAveragePerMinute: 0,
+      idealAveragePerMinute: 0,
+      projectedResult: 0,
+      projectedCompliance: null,
       paceStatus: "on_track",
       paceLabel: "Ritmo estable"
     };
@@ -451,6 +463,13 @@ export async function getDisplayStatus(
   const expectedTotal = getExpectedTotal(jornada, registros, now);
   const delay = Math.max(expectedTotal - dayTotal, 0);
   const ahead = Math.max(dayTotal - expectedTotal, 0);
+  const productiveMinutesElapsed = getProductiveMinutesElapsed(registros, now);
+  const productiveMinutesRemaining = getProductiveMinutesRemaining(registros, now);
+  const currentAveragePerMinute = productiveMinutesElapsed > 0 ? roundTwo(dayTotal / productiveMinutesElapsed) : 0;
+  const idealAveragePerMinute =
+    productiveMinutesRemaining > 0 ? roundTwo(Math.max(dayGoal - dayTotal, 0) / productiveMinutesRemaining) : 0;
+  const projectedResult = Math.round(dayTotal + currentAveragePerMinute * productiveMinutesRemaining);
+  const projectedCompliance = dayGoal > 0 ? Math.round((projectedResult / dayGoal) * 100) : null;
   const isDisabled = Boolean(jornada.deshabilitada);
   const blockStatus = isDisabled ? "missing" : getBlockStatus(jornada, registros, currentBlock, now);
   const copy = jornada.estado !== "activa" ? emptyDisplayCopy() : stationStatusCopy(jornada, blockStatus, isDisabled);
@@ -474,6 +493,12 @@ export async function getDisplayStatus(
     dayRemaining: Math.max(dayGoal - dayTotal, 0),
     expectedTotal,
     delay,
+    ahead,
+    productiveSecondsRemaining: Math.max(Math.round(productiveMinutesRemaining * 60), 0),
+    currentAveragePerMinute,
+    idealAveragePerMinute,
+    projectedResult,
+    projectedCompliance,
     paceStatus: ahead > 0 ? "ahead" : delay > 0 ? "behind" : "on_track",
     paceLabel: ahead > 0 ? "Adelanto de " + ahead + " pares" : delay > 0 ? "Retraso de " + delay + " pares" : "Ritmo estable"
   };
@@ -802,6 +827,24 @@ function getExpectedTotal(jornada: JornadaRow, registros: RegistroHorarioRow[], 
   return Math.round(expected);
 }
 
+function getProductiveMinutesElapsed(registros: RegistroHorarioRow[], now = new Date()): number {
+  const hour = mexicoDecimalHour(now);
+  return registros.reduce((total, registro) => {
+    const start = Number(registro.hora_inicio_bloque);
+    const duration = Number(registro.duracion);
+    return total + Math.min(Math.max(hour - start, 0), duration) * 60;
+  }, 0);
+}
+
+function getProductiveMinutesRemaining(registros: RegistroHorarioRow[], now = new Date()): number {
+  const hour = mexicoDecimalHour(now);
+  return registros.reduce((total, registro) => {
+    const start = Number(registro.hora_inicio_bloque);
+    const end = start + Number(registro.duracion);
+    return total + Math.max(end - Math.max(hour, start), 0) * 60;
+  }, 0);
+}
+
 function findNextBlock(registros: RegistroHorarioRow[], now = new Date()): RegistroHorarioRow | null {
   const hour = mexicoDecimalHour(now);
   for (const registro of registros) {
@@ -878,6 +921,10 @@ function mexicoDateParts(date: Date) {
 
 function pad2(value: number | string): string {
   return String(value).padStart(2, "0");
+}
+
+function roundTwo(value: number): number {
+  return Math.round(value * 100) / 100;
 }
 
 function mexicoDecimalHour(date: Date): number {

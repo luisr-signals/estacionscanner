@@ -9,6 +9,7 @@ export type ApiRequest = {
   body?: unknown;
   cookies?: Record<string, string>;
   headers: Record<string, string | string[] | undefined>;
+  query?: Record<string, string | string[] | undefined>;
 };
 
 export function methodNotAllowed(res: ApiResponse<any>) {

@@ -79,6 +79,22 @@ export type ManualProductData = {
   availableToRemove: boolean;
 };
 
+export type ProductResolutionData = {
+  normalizedCode: string;
+  originalLength: number;
+  normalizedLength: number;
+  stage: "products.codigo_id" | "productos_codigos_alias.codigo_id" | "not_found";
+  product: {
+    id: string;
+    code: string;
+    label: string;
+    status: string;
+    model: string | null;
+    color: string | null;
+    size: string | null;
+  } | null;
+};
+
 export type SavedScan = {
   productId: string;
   product: string;
@@ -202,6 +218,9 @@ export class StationScanError extends Error {
       | "INVALID_SCAN_ID"
       | "INVALID_ADJUSTMENT_ID"
       | "UNKNOWN_BARCODE"
+      | "PRODUCT_NOT_FOUND"
+      | "PRODUCT_INACTIVE"
+      | "CATALOG_PERMISSION_DENIED"
       | "PRODUCT_NOT_WORKED"
       | "REMOVE_NOT_AVAILABLE"
       | "NO_ACTIVE_SHIFT"
@@ -213,6 +232,7 @@ export class StationScanError extends Error {
       | "SCAN_PERMISSION_DENIED"
       | "ADJUSTMENT_NOT_CONFIGURED"
       | "ADJUSTMENT_FAILED"
+      | "SCAN_WRITE_FAILED"
       | "SCAN_FAILED",
     message: string,
     public status: number,
@@ -510,12 +530,9 @@ export async function saveStationScan(client: SupabaseClient, payload: ScanPaylo
     throw new StationScanError("INVALID_SCAN_ID", "Identificador de escaneo invalido.", 400);
   }
 
-  const barcode = payload.barcode.trim();
+  const barcode = normalizeScannedCode(payload.barcode);
   await assertScannerReady(client, payload.profile);
   const product = await findActiveProductByCode(client, barcode);
-  if (!product) {
-    throw new StationScanError("UNKNOWN_BARCODE", "Codigo no reconocido", 404);
-  }
 
   const { data: rpcData, error: rpcError } = await client.rpc("registrar_escaneo_scanner", {
     p_cliente_uuid: scanId,
@@ -646,6 +663,43 @@ export async function saveManualAdjustment(
     hourGoal: status.hourGoal,
     dayTotal: status.dayTotal,
     duplicate: rpcRow.duplicado
+  };
+}
+
+export async function resolveProductForScanner(
+  client: SupabaseClient,
+  rawCode: string
+): Promise<ProductResolutionData> {
+  const normalizedCode = normalizeScannedCode(rawCode);
+  if (!normalizedCode) {
+    throw new StationScanError("PRODUCT_NOT_FOUND", "Codigo no reconocido", 404);
+  }
+
+  const result = await resolveProductByCode(client, normalizedCode);
+  if (!result.product) {
+    return {
+      normalizedCode,
+      originalLength: rawCode.length,
+      normalizedLength: normalizedCode.length,
+      stage: "not_found",
+      product: null
+    };
+  }
+
+  return {
+    normalizedCode,
+    originalLength: rawCode.length,
+    normalizedLength: normalizedCode.length,
+    stage: result.stage,
+    product: {
+      id: result.product.id,
+      code: result.product.codigo_id,
+      label: formatProduct(result.product),
+      status: result.product.estado,
+      model: result.product.modelo,
+      color: result.product.color,
+      size: result.product.talla
+    }
   };
 }
 
@@ -975,18 +1029,36 @@ async function getActiveJourney(client: SupabaseClient, bandId: Banda): Promise<
   return data as JornadaRow | null;
 }
 
-async function findActiveProductByCode(client: SupabaseClient, barcode: string): Promise<ProductoRow | null> {
+type ProductResolutionInternal = {
+  product: ProductoRow | null;
+  stage: ProductResolutionData["stage"];
+};
+
+async function findActiveProductByCode(client: SupabaseClient, barcode: string): Promise<ProductoRow> {
+  const resolved = await resolveProductByCode(client, barcode);
+  if (!resolved.product) {
+    throw new StationScanError("PRODUCT_NOT_FOUND", "Codigo no reconocido", 404);
+  }
+  if (resolved.product.estado !== "activo") {
+    throw new StationScanError("PRODUCT_INACTIVE", "Producto inactivo", 409);
+  }
+  return resolved.product;
+}
+
+async function resolveProductByCode(client: SupabaseClient, barcode: string): Promise<ProductResolutionInternal> {
   const { data: direct, error: directError } = await client
     .from("productos")
     .select("id,codigo_id,cliente_marca,modelo,color,talla,estado")
     .eq("codigo_id", barcode)
-    .eq("estado", "activo")
     .maybeSingle();
 
   if (directError) {
-    throw new StationScanError("SCAN_FAILED", "No fue posible validar el codigo.", 500, true);
+    if (directError.code === "42501" || /permission|rls|policy/i.test(directError.message ?? "")) {
+      throw new StationScanError("CATALOG_PERMISSION_DENIED", "Permiso de catalogo insuficiente.", 403);
+    }
+    throw new StationScanError("SCAN_WRITE_FAILED", "No fue posible validar el codigo.", 500, true);
   }
-  if (direct) return direct as ProductoRow;
+  if (direct) return { product: direct as ProductoRow, stage: "products.codigo_id" };
 
   const { data: alias, error: aliasError } = await client
     .from("productos_codigos_alias")
@@ -995,12 +1067,21 @@ async function findActiveProductByCode(client: SupabaseClient, barcode: string):
     .maybeSingle();
 
   if (aliasError && aliasError.code !== "42P01") {
-    throw new StationScanError("SCAN_FAILED", "No fue posible validar el codigo.", 500, true);
+    if (aliasError.code === "42501" || /permission|rls|policy/i.test(aliasError.message ?? "")) {
+      throw new StationScanError("CATALOG_PERMISSION_DENIED", "Permiso de catalogo insuficiente.", 403);
+    }
+    throw new StationScanError("SCAN_WRITE_FAILED", "No fue posible validar el codigo.", 500, true);
   }
 
   const aliasProductRaw = (alias as { productos?: ProductoRow | ProductoRow[] | null } | null)?.productos ?? null;
   const aliasProduct = Array.isArray(aliasProductRaw) ? aliasProductRaw[0] ?? null : aliasProductRaw;
-  return aliasProduct && aliasProduct.estado === "activo" ? aliasProduct : null;
+  return aliasProduct
+    ? { product: aliasProduct, stage: "productos_codigos_alias.codigo_id" }
+    : { product: null, stage: "not_found" };
+}
+
+export function normalizeScannedCode(value: string): string {
+  return value.trim().replace(/[\r\n]+/g, "");
 }
 
 async function assertScannerReady(client: SupabaseClient, profile: StationProfile): Promise<void> {

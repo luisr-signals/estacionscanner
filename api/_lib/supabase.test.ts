@@ -5,6 +5,8 @@ import {
   getManualProducts,
   getRecentScans,
   getStationStatus,
+  normalizeScannedCode,
+  resolveProductForScanner,
   saveManualAdjustment,
   saveStationScan,
   StationProfile
@@ -30,7 +32,59 @@ const product = {
   estado: "activo"
 };
 
+const leadingZeroProduct = {
+  ...product,
+  id: "product-leading-zero",
+  codigo_id: "0888930260",
+  modelo: "Etiqueta Dino"
+};
+
 describe("station Supabase scanner writes", () => {
+  it("keeps leading-zero barcodes as text through catalog resolution", async () => {
+    const client = makeClient({ product: leadingZeroProduct, rpc: vi.fn() });
+
+    const resolution = await resolveProductForScanner(client, " 0888930260\r\n");
+
+    expect(normalizeScannedCode(" 0888930260\r\n")).toBe("0888930260");
+    expect(resolution).toMatchObject({
+      normalizedCode: "0888930260",
+      normalizedLength: 10,
+      stage: "products.codigo_id",
+      product: {
+        id: "product-leading-zero",
+        code: "0888930260",
+        status: "activo"
+      }
+    });
+  });
+
+  it("does not treat a leading-zero barcode and its numeric-looking variant as the same code", async () => {
+    const client = makeClient({ product: leadingZeroProduct, rpc: vi.fn() });
+
+    await expect(resolveProductForScanner(client, "0888930260")).resolves.toMatchObject({
+      product: { id: "product-leading-zero" }
+    });
+    await expect(resolveProductForScanner(client, "888930260")).resolves.toMatchObject({
+      normalizedCode: "888930260",
+      stage: "not_found",
+      product: null
+    });
+  });
+
+  it("classifies inactive catalog matches before writing production", async () => {
+    const rpc = vi.fn();
+    const client = makeClient({ product: { ...leadingZeroProduct, estado: "inactivo" }, rpc });
+
+    await expect(
+      saveStationScan(client, {
+        barcode: "0888930260",
+        scanId: "10101010-1010-4010-8010-101010101010",
+        profile
+      })
+    ).rejects.toMatchObject({ code: "PRODUCT_INACTIVE", status: 409 });
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
   it("rejects unknown barcodes before calling the production RPC", async () => {
     const rpc = vi.fn();
     const client = makeClient({ product: null, rpc });
@@ -41,7 +95,7 @@ describe("station Supabase scanner writes", () => {
         scanId: "11111111-1111-4111-8111-111111111111",
         profile
       })
-    ).rejects.toMatchObject({ code: "UNKNOWN_BARCODE", status: 404 });
+    ).rejects.toMatchObject({ code: "PRODUCT_NOT_FOUND", status: 404 });
 
     expect(rpc).not.toHaveBeenCalled();
   });
@@ -481,6 +535,7 @@ function makeClient({
 
 class FakeQuery {
   private selected = "";
+  private filters = new Map<string, unknown>();
 
   constructor(
     private table: string,
@@ -496,7 +551,8 @@ class FakeQuery {
     return this;
   }
 
-  eq() {
+  eq(column: string, value: unknown) {
+    this.filters.set(column, value);
     return this;
   }
 
@@ -513,7 +569,13 @@ class FakeQuery {
   }
 
   async maybeSingle() {
-    if (this.table === "productos") return { data: this.activeProduct, error: null };
+    if (this.table === "productos") {
+      const requestedCode = this.filters.get("codigo_id");
+      const requestedStatus = this.filters.get("estado");
+      const codeMatches = requestedCode == null || this.activeProduct?.codigo_id === requestedCode;
+      const statusMatches = requestedStatus == null || this.activeProduct?.estado === requestedStatus;
+      return { data: this.activeProduct && codeMatches && statusMatches ? this.activeProduct : null, error: null };
+    }
     if (this.table === "productos_codigos_alias") return { data: null, error: null };
     if (this.table === "jornadas") {
       return {

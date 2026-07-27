@@ -507,8 +507,14 @@ function scanErrorCopy(code: string, message: string) {
   if (code === "INVALID_SCAN_ID") {
     return { title: "No fue posible preparar el escaneo", detail: "Intenta nuevamente." };
   }
-  if (code === "UNKNOWN_BARCODE") {
+  if (code === "UNKNOWN_BARCODE" || code === "PRODUCT_NOT_FOUND") {
     return { title: "Codigo no reconocido", detail: "No se registro ningun par." };
+  }
+  if (code === "PRODUCT_INACTIVE") {
+    return { title: "Producto inactivo", detail: "No se registro ningun par." };
+  }
+  if (code === "CATALOG_PERMISSION_DENIED") {
+    return { title: "Catalogo no disponible", detail: "No se registro ningun par." };
   }
   if (code === "NO_ACTIVE_SHIFT" || code === "SHIFT_INACTIVE") {
     return { title: "No hay jornada activa", detail: "Espera a que DinoCore abra la jornada." };

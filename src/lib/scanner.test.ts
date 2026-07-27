@@ -3,7 +3,10 @@ import { canSubmitScan, createScanId, normalizeBarcode, scannerTone } from "./sc
 
 describe("scanner capture helpers", () => {
   it("normalizes scanner input before sending it", () => {
-    expect(normalizeBarcode(" 8955 301230070649 \n")).toBe("8955301230070649");
+    expect(normalizeBarcode(" 0888930260 \n")).toBe("0888930260");
+    expect(normalizeBarcode("0888930260")).toHaveLength(10);
+    expect(normalizeBarcode("0888 930260")).toBe("0888 930260");
+    expect(normalizeBarcode("0888930260\n")).not.toBe("888930260");
   });
 
   it("blocks empty, busy, or offline submissions", () => {

@@ -26,6 +26,7 @@ const profile: StationProfile = {
 const product = {
   id: "product-1",
   codigo_id: "ABC123",
+  sku: "ABC",
   cliente_marca: "DinoCore",
   modelo: "Tenis",
   color: "Negro",
@@ -662,10 +663,12 @@ class FakeQuery {
   async maybeSingle() {
     if (this.table === "productos") {
       const requestedCode = this.filters.get("codigo_id");
+      const requestedSku = this.filters.get("sku");
       const requestedStatus = this.filters.get("estado");
       const codeMatches = requestedCode == null || this.activeProduct?.codigo_id === requestedCode;
+      const skuMatches = requestedSku == null || this.activeProduct?.sku === requestedSku;
       const statusMatches = requestedStatus == null || this.activeProduct?.estado === requestedStatus;
-      return { data: this.activeProduct && codeMatches && statusMatches ? this.activeProduct : null, error: null };
+      return { data: this.activeProduct && codeMatches && skuMatches && statusMatches ? this.activeProduct : null, error: null };
     }
     if (this.table === "productos_codigos_alias") return { data: null, error: null };
     if (this.table === "jornadas") {

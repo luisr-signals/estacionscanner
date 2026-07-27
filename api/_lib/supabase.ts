@@ -207,6 +207,7 @@ type RegistroHorarioRow = {
 type ProductoRow = {
   id: string;
   codigo_id: string;
+  sku?: string | null;
   cliente_marca: string | null;
   modelo: string | null;
   color: string | null;
@@ -1247,7 +1248,7 @@ async function findActiveProductByCode(client: SupabaseClient, barcode: string):
 async function resolveProductByCode(client: SupabaseClient, barcode: string): Promise<ProductResolutionInternal> {
   const { data: direct, error: directError } = await client
     .from("productos")
-    .select("id,codigo_id,cliente_marca,modelo,color,talla,estado")
+    .select("id,codigo_id,sku,cliente_marca,modelo,color,talla,estado")
     .eq("codigo_id", barcode)
     .maybeSingle();
 
@@ -1261,7 +1262,7 @@ async function resolveProductByCode(client: SupabaseClient, barcode: string): Pr
 
   const { data: alias, error: aliasError } = await client
     .from("productos_codigos_alias")
-    .select("productos(id,codigo_id,cliente_marca,modelo,color,talla,estado)")
+    .select("productos(id,codigo_id,sku,cliente_marca,modelo,color,talla,estado)")
     .eq("codigo_id", barcode)
     .maybeSingle();
 

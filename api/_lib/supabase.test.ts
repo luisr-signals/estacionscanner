@@ -4,6 +4,7 @@ import {
   getDisplayStatus,
   getManualProducts,
   getRecentScans,
+  getScannerPreflight,
   getStationStatus,
   normalizeScannedCode,
   resolveProductForScanner,
@@ -158,6 +159,93 @@ describe("station Supabase scanner writes", () => {
 
     expect(saved.duplicate).toBe(true);
     expect(saved.hourTotal).toBe(8);
+  });
+
+  it("accepts the RPC result when the secondary event confirmation is unreadable", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: [
+        {
+          evento_id: "event-1",
+          registro_horario_id: "block-1",
+          pares_bloque: 8,
+          producto_id: "product-1",
+          duplicado: false
+        }
+      ],
+      error: null
+    });
+    const client = makeClient({ product, rpc, eventConfirmationError: true });
+
+    const saved = await saveStationScan(client, {
+      barcode: "ABC123",
+      scanId: "3aaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      profile
+    });
+
+    expect(saved).toMatchObject({
+      productId: "product-1",
+      product: "Tenis - Negro - Talla 27",
+      hourTotal: 8,
+      duplicate: false
+    });
+  });
+
+  it("maps missing scanner RPC separately from generic write failures", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: null,
+      error: { code: "42883", message: "function registrar_escaneo_scanner does not exist" }
+    });
+    const client = makeClient({ product, rpc });
+
+    await expect(
+      saveStationScan(client, {
+        barcode: "ABC123",
+        scanId: "3bbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        profile
+      })
+    ).rejects.toMatchObject({ code: "SCAN_RPC_NOT_FOUND", status: 500 });
+  });
+
+  it("maps deployed RPC return type mismatches as signature mismatches", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: null,
+      error: { code: "42804", message: "structure of query does not match function result type" }
+    });
+    const client = makeClient({ product, rpc });
+
+    await expect(
+      saveStationScan(client, {
+        barcode: "ABC123",
+        scanId: "3ccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        profile
+      })
+    ).rejects.toMatchObject({ code: "SCAN_RPC_SIGNATURE_MISMATCH", status: 500 });
+  });
+
+  it("preflights catalog, journey, current block, and RPC contract without writing", async () => {
+    const rpc = vi.fn();
+    const client = makeClient({ product: leadingZeroProduct, rpc });
+
+    const preflight = await getScannerPreflight(client, profile, "888930260", ["0888930260"], mexicoDateAtHour(9));
+
+    expect(preflight.input).toMatchObject({
+      received: "888930260",
+      normalizedCode: "888930260",
+      normalizedLength: 9
+    });
+    expect(preflight.catalogChecks).toMatchObject([
+      { normalizedCode: "888930260", stage: "not_found", product: null },
+      { normalizedCode: "0888930260", stage: "products.codigo_id", product: { code: "0888930260", codeLength: 10 } }
+    ]);
+    expect(preflight).toMatchObject({
+      canonicalCode: null,
+      productReady: false,
+      journey: { id: "journey-1", bandId: 1, state: "activa" },
+      block: { id: "block-1", status: "active", timezone: "America/Mexico_City" },
+      rpc: { name: "registrar_escaneo_scanner", executionCheck: "not_executed_read_only" },
+      expectedStatus: "PRODUCT_NOT_FOUND"
+    });
+    expect(rpc).not.toHaveBeenCalled();
   });
 
   it("allows the same barcode when each physical read has a different scan id", async () => {
@@ -516,7 +604,8 @@ function makeClient({
   manualEvents,
   duplicateManualEvents = false,
   jornada,
-  registros
+  registros,
+  eventConfirmationError = false
 }: {
   product: typeof product | null;
   rpc: ReturnType<typeof vi.fn>;
@@ -524,11 +613,12 @@ function makeClient({
   duplicateManualEvents?: boolean;
   jornada?: Partial<{ id: string; estado: "activa" | "cerrada"; banda: 1; meta_por_hora: number; hora_inicio: number; hora_fin_efectiva: number }>;
   registros?: unknown[];
+  eventConfirmationError?: boolean;
 }) {
   return {
     rpc,
     from(table: string) {
-      return new FakeQuery(table, activeProduct, manualEvents, duplicateManualEvents, jornada, registros);
+      return new FakeQuery(table, activeProduct, manualEvents, duplicateManualEvents, jornada, registros, eventConfirmationError);
     }
   } as never;
 }
@@ -543,7 +633,8 @@ class FakeQuery {
     private manualEvents?: unknown[],
     private duplicateManualEvents = false,
     private jornada?: Partial<{ id: string; estado: "activa" | "cerrada"; banda: 1; meta_por_hora: number; hora_inicio: number; hora_fin_efectiva: number }>,
-    private registros?: unknown[]
+    private registros?: unknown[],
+    private eventConfirmationError = false
   ) {}
 
   select(columns: string) {
@@ -602,6 +693,9 @@ class FakeQuery {
       return { data: { created_at: "2026-07-25T23:02:00.000Z" }, error: null };
     }
     if (this.table === "produccion_eventos") {
+      if (this.eventConfirmationError) {
+        return { data: null, error: { code: "42501", message: "permission denied for table produccion_eventos" } };
+      }
       return {
         data: {
           id: "event-1",

@@ -83,16 +83,75 @@ export type ProductResolutionData = {
   normalizedCode: string;
   originalLength: number;
   normalizedLength: number;
+  trimmedLength: number;
+  removedOnlyLineTerminators: boolean;
   stage: "products.codigo_id" | "productos_codigos_alias.codigo_id" | "not_found";
   product: {
     id: string;
     code: string;
+    codeLength: number;
+    codeHasOuterWhitespace: boolean;
+    codeHasInvisibleWhitespace: boolean;
     label: string;
     status: string;
     model: string | null;
     color: string | null;
     size: string | null;
   } | null;
+};
+
+export type ScannerPreflightData = {
+  input: {
+    received: string;
+    receivedLength: number;
+    trimmed: string;
+    trimmedLength: number;
+    normalizedCode: string;
+    normalizedLength: number;
+  };
+  profile: {
+    userId: string;
+    role: string;
+    bandId: Banda;
+    bandName: string;
+    stationId: string;
+    stationMode: StationMode;
+  };
+  catalogChecks: ProductResolutionData[];
+  canonicalCode: string | null;
+  productReady: boolean;
+  journey: {
+    id: string;
+    state: string;
+    bandId: Banda;
+    operatingDate: string;
+    disabled: boolean;
+  } | null;
+  block: {
+    id: string;
+    status: StationStatusData["blockStatus"];
+    startsAtHour: number;
+    durationHours: number;
+    endsAtHour: number;
+    pairs: number;
+    timezone: "America/Mexico_City";
+  } | null;
+  rpc: {
+    name: "registrar_escaneo_scanner";
+    parameters: {
+      p_cliente_uuid: "uuid";
+      p_codigo: "text";
+    };
+    executionCheck: "not_executed_read_only";
+  };
+  expectedStatus:
+    | "READY_TO_SCAN"
+    | "PRODUCT_NOT_FOUND"
+    | "PRODUCT_INACTIVE"
+    | "NO_ACTIVE_SHIFT"
+    | "NO_ACTIVE_BLOCK"
+    | "BREAK_TIME"
+    | "OUTSIDE_SCHEDULE";
 };
 
 export type SavedScan = {
@@ -230,6 +289,10 @@ export class StationScanError extends Error {
       | "SHIFT_INACTIVE"
       | "OUTSIDE_HOUR_BLOCK"
       | "SCAN_PERMISSION_DENIED"
+      | "SCAN_RPC_NOT_FOUND"
+      | "SCAN_RPC_SIGNATURE_MISMATCH"
+      | "SCAN_CONSTRAINT_VIOLATION"
+      | "SCAN_CONFIRMATION_UNREADABLE"
       | "ADJUSTMENT_NOT_CONFIGURED"
       | "ADJUSTMENT_FAILED"
       | "SCAN_WRITE_FAILED"
@@ -548,18 +611,33 @@ export async function saveStationScan(client: SupabaseClient, payload: ScanPaylo
     if (rpcError.code === "42501" || /autorizado|permission|permiso/i.test(message)) {
       throw new StationScanError("SCAN_PERMISSION_DENIED", "Esta cuenta no tiene permiso para registrar escaneos.", 403);
     }
+    if (rpcError.code === "42883" || /function .* does not exist|schema cache|signature/i.test(message)) {
+      throw new StationScanError("SCAN_RPC_NOT_FOUND", "La funcion de registro no esta disponible.", 500, true);
+    }
+    if (rpcError.code === "PGRST202" || rpcError.code === "42804" || /could not find.*function|parameter/i.test(message)) {
+      throw new StationScanError("SCAN_RPC_SIGNATURE_MISMATCH", "La llamada de registro no coincide con la funcion desplegada.", 500, true);
+    }
     if (rpcError.code === "P0002" && /jornada/i.test(message)) {
       throw new StationScanError("SHIFT_INACTIVE", "La jornada de " + payload.profile.bandName + " no esta disponible.", 409);
     }
     if (rpcError.code === "P0002" && /bloque/i.test(message)) {
       throw new StationScanError("OUTSIDE_HOUR_BLOCK", "Fuera de bloque horario.", 409);
     }
-    throw new StationScanError("SCAN_FAILED", "No fue posible guardar el registro.", 500, true);
+    if (/NO_ACTIVE_BLOCK/i.test(message)) {
+      throw new StationScanError("NO_ACTIVE_BLOCK", "No existe un bloque habilitado para esta hora.", 409);
+    }
+    if (/BREAK_TIME/i.test(message)) {
+      throw new StationScanError("BREAK_TIME", "Horario de descanso.", 409);
+    }
+    if (["23502", "23503", "23505", "23514", "22P02"].includes(rpcError.code ?? "")) {
+      throw new StationScanError("SCAN_CONSTRAINT_VIOLATION", "La base de datos rechazo el registro.", 500, true);
+    }
+    throw new StationScanError("SCAN_WRITE_FAILED", "No se pudo confirmar el registro.", 500, true);
   }
 
   const rpcRow = normalizeRpcResult(rpcData);
   if (!rpcRow) {
-    throw new StationScanError("SCAN_FAILED", "La respuesta del registro no fue valida.", 500, true);
+    throw new StationScanError("SCAN_RPC_SIGNATURE_MISMATCH", "La respuesta del registro no fue valida.", 500, true);
   }
 
   const { data: eventData, error: eventError } = await client
@@ -569,18 +647,21 @@ export async function saveStationScan(client: SupabaseClient, payload: ScanPaylo
     .maybeSingle();
 
   if (eventError || !eventData) {
-    throw new StationScanError("SCAN_FAILED", "El registro se guardo, pero no fue posible leer la confirmacion.", 500, true);
+    logStationIssue("produccion_eventos.confirmation", "SCAN_CONFIRMATION_UNREADABLE", {
+      userId: payload.profile.userId,
+      supabaseCode: eventError?.code ?? null
+    });
   }
 
   const dayTotal = await getDayTotal(client, rpcRow.evento_id);
   const hourGoal = await getHourGoalForRegister(client, rpcRow.registro_horario_id);
-  const event = normalizeEvent(eventData);
-  const canonicalProduct = event.products ?? product;
+  const event = eventData ? normalizeEvent(eventData) : null;
+  const canonicalProduct = event?.products ?? product;
 
   return {
     productId: canonicalProduct.id,
     product: formatProduct(canonicalProduct),
-    scannedAt: event.hora_registro,
+    scannedAt: event?.hora_registro ?? new Date().toISOString(),
     hourTotal: rpcRow.pares_bloque,
     hourGoal,
     dayTotal,
@@ -670,6 +751,7 @@ export async function resolveProductForScanner(
   client: SupabaseClient,
   rawCode: string
 ): Promise<ProductResolutionData> {
+  const trimmedCode = rawCode.trim();
   const normalizedCode = normalizeScannedCode(rawCode);
   if (!normalizedCode) {
     throw new StationScanError("PRODUCT_NOT_FOUND", "Codigo no reconocido", 404);
@@ -680,7 +762,9 @@ export async function resolveProductForScanner(
     return {
       normalizedCode,
       originalLength: rawCode.length,
+      trimmedLength: trimmedCode.length,
       normalizedLength: normalizedCode.length,
+      removedOnlyLineTerminators: normalizedCode === trimmedCode.replace(/[\r\n]+/g, ""),
       stage: "not_found",
       product: null
     };
@@ -689,17 +773,96 @@ export async function resolveProductForScanner(
   return {
     normalizedCode,
     originalLength: rawCode.length,
+    trimmedLength: trimmedCode.length,
     normalizedLength: normalizedCode.length,
+    removedOnlyLineTerminators: normalizedCode === trimmedCode.replace(/[\r\n]+/g, ""),
     stage: result.stage,
     product: {
       id: result.product.id,
       code: result.product.codigo_id,
+      codeLength: result.product.codigo_id.length,
+      codeHasOuterWhitespace: result.product.codigo_id !== result.product.codigo_id.trim(),
+      codeHasInvisibleWhitespace: /\s/.test(result.product.codigo_id),
       label: formatProduct(result.product),
       status: result.product.estado,
       model: result.product.modelo,
       color: result.product.color,
       size: result.product.talla
     }
+  };
+}
+
+export async function getScannerPreflight(
+  client: SupabaseClient,
+  profile: StationProfile,
+  rawCode: string,
+  compareCodes: string[] = [],
+  now = new Date()
+): Promise<ScannerPreflightData> {
+  const trimmed = rawCode.trim();
+  const normalizedCode = normalizeScannedCode(rawCode);
+  const codes = [rawCode, ...compareCodes].filter((code, index, values) => code && values.indexOf(code) === index);
+  const catalogChecks = await Promise.all(codes.map((code) => resolveProductForScanner(client, code)));
+  const primary = catalogChecks[0] ?? null;
+  const productReady = Boolean(primary?.product && primary.product.status === "activo");
+
+  const jornada = await getActiveJourney(client, profile.bandId);
+  let registros: RegistroHorarioRow[] = [];
+  if (jornada) {
+    registros = await getJourneyRegisters(client, jornada.id, profile.userId);
+  }
+  const currentBlock = findCurrentBlock(registros, now);
+  const blockStatus = jornada ? getBlockStatus(jornada, registros, currentBlock, now) : "missing";
+
+  return {
+    input: {
+      received: rawCode,
+      receivedLength: rawCode.length,
+      trimmed,
+      trimmedLength: trimmed.length,
+      normalizedCode,
+      normalizedLength: normalizedCode.length
+    },
+    profile: {
+      userId: profile.userId,
+      role: profile.role,
+      bandId: profile.bandId,
+      bandName: profile.bandName,
+      stationId: profile.stationId,
+      stationMode: profile.stationMode
+    },
+    catalogChecks,
+    canonicalCode: primary?.product?.code ?? null,
+    productReady,
+    journey: jornada
+      ? {
+          id: jornada.id,
+          state: jornada.estado,
+          bandId: jornada.banda,
+          operatingDate: jornada.fecha,
+          disabled: Boolean(jornada.deshabilitada)
+        }
+      : null,
+    block: currentBlock
+      ? {
+          id: currentBlock.id,
+          status: blockStatus,
+          startsAtHour: Number(currentBlock.hora_inicio_bloque),
+          durationHours: Number(currentBlock.duracion),
+          endsAtHour: Number(currentBlock.hora_inicio_bloque) + Number(currentBlock.duracion),
+          pairs: currentBlock.pares ?? 0,
+          timezone: "America/Mexico_City"
+        }
+      : null,
+    rpc: {
+      name: "registrar_escaneo_scanner",
+      parameters: {
+        p_cliente_uuid: "uuid",
+        p_codigo: "text"
+      },
+      executionCheck: "not_executed_read_only"
+    },
+    expectedStatus: preflightExpectedStatus(Boolean(jornada), blockStatus, productReady, primary?.product?.status ?? null)
   };
 }
 
@@ -1027,6 +1190,42 @@ async function getActiveJourney(client: SupabaseClient, bandId: Banda): Promise<
 
   if (error) throw new StationDataError(classifySupabaseError(error), "No fue posible leer la jornada activa.");
   return data as JornadaRow | null;
+}
+
+async function getJourneyRegisters(
+  client: SupabaseClient,
+  jornadaId: string,
+  userId: string
+): Promise<RegistroHorarioRow[]> {
+  const { data, error } = await client
+    .from("registros_horarios")
+    .select("id,hora_inicio_bloque,duracion,pares,orden")
+    .eq("jornada_id", jornadaId)
+    .order("orden", { ascending: true });
+
+  if (error) {
+    logStationIssue("registros_horarios.preflight", classifySupabaseError(error), {
+      userId,
+      supabaseCode: error.code ?? null
+    });
+    throw new StationDataError(classifySupabaseError(error), "No fue posible leer los bloques horarios.");
+  }
+
+  return (data ?? []) as RegistroHorarioRow[];
+}
+
+function preflightExpectedStatus(
+  hasJourney: boolean,
+  blockStatus: StationStatusData["blockStatus"],
+  productReady: boolean,
+  productStatus: string | null
+): ScannerPreflightData["expectedStatus"] {
+  if (!hasJourney) return "NO_ACTIVE_SHIFT";
+  if (!productReady) return productStatus && productStatus !== "activo" ? "PRODUCT_INACTIVE" : "PRODUCT_NOT_FOUND";
+  if (blockStatus === "active") return "READY_TO_SCAN";
+  if (blockStatus === "break") return "BREAK_TIME";
+  if (blockStatus === "outside_schedule") return "OUTSIDE_SCHEDULE";
+  return "NO_ACTIVE_BLOCK";
 }
 
 type ProductResolutionInternal = {

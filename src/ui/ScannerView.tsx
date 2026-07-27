@@ -523,10 +523,22 @@ function scanErrorCopy(code: string, message: string) {
     return { title: "Horario de descanso", detail: "El registro se reanudara al comenzar el siguiente bloque." };
   }
   if (code === "NO_ACTIVE_BLOCK" || code === "OUTSIDE_HOUR_BLOCK") {
-    return { title: "Sin bloque horario", detail: "No existe un bloque habilitado para esta hora." };
+    return { title: "Escaneo fuera del bloque productivo", detail: "No se registro ningun par." };
   }
   if (code === "OUTSIDE_SCHEDULE") {
-    return { title: "Fuera del horario de produccion", detail: "No existe un bloque habilitado para esta hora." };
+    return { title: "Escaneo fuera del bloque productivo", detail: "No se registro ningun par." };
+  }
+  if (code === "SCAN_PERMISSION_DENIED") {
+    return { title: "La estacion no tiene permiso para registrar", detail: "Contacta al administrador." };
+  }
+  if (code === "SCAN_RPC_NOT_FOUND" || code === "SCAN_RPC_SIGNATURE_MISMATCH") {
+    return { title: "Registro no configurado", detail: "Contacta al administrador." };
+  }
+  if (code === "SCAN_CONSTRAINT_VIOLATION") {
+    return { title: "La base rechazo el registro", detail: "Puedes reintentar sin duplicar el evento." };
+  }
+  if (code === "SCAN_CONFIRMATION_UNREADABLE" || code === "SCAN_WRITE_FAILED" || code === "SCAN_FAILED") {
+    return { title: "No se pudo confirmar el registro", detail: "Puedes reintentar sin duplicar el evento." };
   }
   return { title: message, detail: "El registro no fue confirmado." };
 }

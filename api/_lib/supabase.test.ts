@@ -73,33 +73,38 @@ describe("station Supabase scanner writes", () => {
     });
   });
 
-  it("classifies inactive catalog matches before writing production", async () => {
-    const rpc = vi.fn();
-    const client = makeClient({ product: { ...leadingZeroProduct, estado: "inactivo" }, rpc });
+  it("records an unknown barcode as a pending unidentified pair", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: [
+        {
+          evento_id: "event-1",
+          registro_horario_id: "block-1",
+          pares_bloque: 9,
+          producto_id: null,
+          duplicado: false
+        }
+      ],
+      error: null
+    });
+    const client = makeClient({ product: null, rpc, eventCode: "NOPE" });
 
-    await expect(
-      saveStationScan(client, {
-        barcode: "0888930260",
-        scanId: "10101010-1010-4010-8010-101010101010",
-        profile
-      })
-    ).rejects.toMatchObject({ code: "PRODUCT_INACTIVE", status: 409 });
-    expect(rpc).not.toHaveBeenCalled();
-  });
+    const saved = await saveStationScan(client, {
+      barcode: "NOPE",
+      scanId: "11111111-1111-4111-8111-111111111111",
+      profile
+    });
 
-  it("rejects unknown barcodes before calling the production RPC", async () => {
-    const rpc = vi.fn();
-    const client = makeClient({ product: null, rpc });
-
-    await expect(
-      saveStationScan(client, {
-        barcode: "NOPE",
-        scanId: "11111111-1111-4111-8111-111111111111",
-        profile
-      })
-    ).rejects.toMatchObject({ code: "PRODUCT_NOT_FOUND", status: 404 });
-
-    expect(rpc).not.toHaveBeenCalled();
+    expect(rpc).toHaveBeenCalledWith("registrar_escaneo_scanner", {
+      p_cliente_uuid: "11111111-1111-4111-8111-111111111111",
+      p_codigo: "NOPE"
+    });
+    expect(saved).toMatchObject({
+      productId: null,
+      product: "Codigo NOPE - Producto pendiente de identificar",
+      code: "NOPE",
+      hourTotal: 9,
+      unidentified: true
+    });
   });
 
   it("records a known barcode through registrar_escaneo_scanner", async () => {
@@ -133,7 +138,37 @@ describe("station Supabase scanner writes", () => {
       hourTotal: 8,
       hourGoal: 10,
       dayTotal: 12,
-      duplicate: false
+      duplicate: false,
+      unidentified: false
+    });
+  });
+
+  it("keeps duplicate pending scan state from the RPC without double counting", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: [
+        {
+          evento_id: "event-1",
+          registro_horario_id: "block-1",
+          pares_bloque: 9,
+          producto_id: null,
+          duplicado: true
+        }
+      ],
+      error: null
+    });
+    const client = makeClient({ product: null, rpc, eventCode: "NOPE" });
+
+    const saved = await saveStationScan(client, {
+      barcode: "NOPE",
+      scanId: "12121212-1212-4212-8212-121212121212",
+      profile
+    });
+
+    expect(saved).toMatchObject({
+      productId: null,
+      duplicate: true,
+      unidentified: true,
+      hourTotal: 9
     });
   });
 
@@ -184,10 +219,11 @@ describe("station Supabase scanner writes", () => {
     });
 
     expect(saved).toMatchObject({
-      productId: "product-1",
-      product: "Tenis - Negro - Talla 27",
+      productId: null,
+      product: "Codigo ABC123 - Producto pendiente de identificar",
       hourTotal: 8,
-      duplicate: false
+      duplicate: false,
+      unidentified: true
     });
   });
 
@@ -606,7 +642,8 @@ function makeClient({
   duplicateManualEvents = false,
   jornada,
   registros,
-  eventConfirmationError = false
+  eventConfirmationError = false,
+  eventCode = "ABC123"
 }: {
   product: typeof product | null;
   rpc: ReturnType<typeof vi.fn>;
@@ -615,11 +652,12 @@ function makeClient({
   jornada?: Partial<{ id: string; estado: "activa" | "cerrada"; banda: 1; meta_por_hora: number; hora_inicio: number; hora_fin_efectiva: number }>;
   registros?: unknown[];
   eventConfirmationError?: boolean;
+  eventCode?: string;
 }) {
   return {
     rpc,
     from(table: string) {
-      return new FakeQuery(table, activeProduct, manualEvents, duplicateManualEvents, jornada, registros, eventConfirmationError);
+      return new FakeQuery(table, activeProduct, manualEvents, duplicateManualEvents, jornada, registros, eventConfirmationError, eventCode);
     }
   } as never;
 }
@@ -635,7 +673,8 @@ class FakeQuery {
     private duplicateManualEvents = false,
     private jornada?: Partial<{ id: string; estado: "activa" | "cerrada"; banda: 1; meta_por_hora: number; hora_inicio: number; hora_fin_efectiva: number }>,
     private registros?: unknown[],
-    private eventConfirmationError = false
+    private eventConfirmationError = false,
+    private eventCode = "ABC123"
   ) {}
 
   select(columns: string) {
@@ -702,10 +741,12 @@ class FakeQuery {
       return {
         data: {
           id: "event-1",
-          codigo: "ABC123",
+          codigo: this.eventCode,
+          codigo_normalizado: this.eventCode,
+          estado_identificacion: this.activeProduct ? "identificado" : "pendiente",
           hora_registro: "2026-07-25T23:00:00.000Z",
           hora_local: "2026-07-25T17:00:00",
-          producto_id: "product-1",
+          producto_id: this.activeProduct?.id ?? null,
           cantidad: 1,
           estado: "activo",
           productos: this.activeProduct
@@ -729,20 +770,24 @@ class FakeQuery {
         data: [
           {
             id: "event-2",
-            codigo: "ABC123",
+            codigo: this.eventCode,
+            codigo_normalizado: this.eventCode,
+            estado_identificacion: this.activeProduct ? "identificado" : "pendiente",
             hora_registro: "2026-07-25T23:01:00.000Z",
             hora_local: "2026-07-25T17:01:00",
-            producto_id: "product-1",
+            producto_id: this.activeProduct?.id ?? null,
             cantidad: 1,
             estado: "activo",
             productos: this.activeProduct
           },
           {
             id: "event-1",
-            codigo: "ABC123",
+            codigo: this.eventCode,
+            codigo_normalizado: this.eventCode,
+            estado_identificacion: this.activeProduct ? "identificado" : "pendiente",
             hora_registro: "2026-07-25T23:00:00.000Z",
             hora_local: "2026-07-25T17:00:00",
-            producto_id: "product-1",
+            producto_id: this.activeProduct?.id ?? null,
             cantidad: 1,
             estado: "activo",
             productos: this.activeProduct

@@ -335,6 +335,12 @@ input:focus {
   color: #7b5b00;
 }
 
+.notice-warning {
+  background: #fff7d8;
+  border: 1px solid #e8c252;
+  color: #6d5200;
+}
+
 .notice-offline {
   background: #eceff3;
   border: 1px solid #c8d0dc;

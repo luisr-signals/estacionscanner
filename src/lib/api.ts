@@ -37,18 +37,20 @@ export type ScanResult =
   | {
       ok: true;
       product: string;
-      productId?: string;
+      productId: string | null;
+      code: string;
       scannedAt: string;
       hourTotal: number;
       hourGoal: number | null;
       dayTotal: number;
       duplicate: boolean;
+      unidentified: boolean;
     }
   | { ok: false; code: string; message: string; retryable?: boolean };
 
 export type RecentScan = {
   id: string;
-  productId: string;
+  productId: string | null;
   product: string;
   scannedAt: string;
   quantity: MovementQuantity;

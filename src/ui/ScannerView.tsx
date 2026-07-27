@@ -19,7 +19,7 @@ type Props = {
 };
 
 type Notice = {
-  tone: "success" | "error" | "waiting" | "offline";
+  tone: "success" | "error" | "waiting" | "warning" | "offline";
   title: string;
   detail: string;
 };
@@ -190,9 +190,13 @@ export function ScannerView({ onLogout }: Props) {
           setTotals({ hourTotal: result.hourTotal, hourGoal: result.hourGoal });
           showNotice(
             {
-              tone: "success",
-              title: result.duplicate ? "Registro ya confirmado" : "+1 par registrado",
-              detail: result.product
+              tone: result.unidentified ? "warning" : "success",
+              title: result.duplicate
+                ? "Registro ya confirmado"
+                : result.unidentified
+                  ? "+1 par registrado - producto pendiente de identificar"
+                  : "+1 par registrado",
+              detail: result.unidentified ? "Codigo: " + result.code : result.product
             },
             true
           );

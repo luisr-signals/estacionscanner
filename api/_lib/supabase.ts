@@ -155,18 +155,20 @@ export type ScannerPreflightData = {
 };
 
 export type SavedScan = {
-  productId: string;
+  productId: string | null;
   product: string;
+  code: string;
   scannedAt: string;
   hourTotal: number;
   hourGoal: number | null;
   dayTotal: number;
   duplicate: boolean;
+  unidentified: boolean;
 };
 
 export type RecentScanData = {
   id: string;
-  productId: string;
+  productId: string | null;
   product: string;
   scannedAt: string;
   quantity: 1 | -1;
@@ -219,6 +221,8 @@ type ProduccionEventoRow = {
   id: string;
   cliente_uuid?: string;
   codigo: string;
+  codigo_normalizado?: string | null;
+  estado_identificacion?: "identificado" | "pendiente" | null;
   hora_registro: string;
   hora_local: string | null;
   jornada_id?: string;
@@ -596,7 +600,6 @@ export async function saveStationScan(client: SupabaseClient, payload: ScanPaylo
 
   const barcode = normalizeScannedCode(payload.barcode);
   await assertScannerReady(client, payload.profile);
-  const product = await findActiveProductByCode(client, barcode);
 
   const { data: rpcData, error: rpcError } = await client.rpc("registrar_escaneo_scanner", {
     p_cliente_uuid: scanId,
@@ -643,7 +646,7 @@ export async function saveStationScan(client: SupabaseClient, payload: ScanPaylo
 
   const { data: eventData, error: eventError } = await client
     .from("produccion_eventos")
-    .select("id,codigo,hora_registro,hora_local,producto_id,cantidad,estado,productos(id,codigo_id,cliente_marca,modelo,color,talla,estado)")
+    .select("id,codigo,codigo_normalizado,estado_identificacion,hora_registro,hora_local,producto_id,cantidad,estado,productos(id,codigo_id,cliente_marca,modelo,color,talla,estado)")
     .eq("id", rpcRow.evento_id)
     .maybeSingle();
 
@@ -657,16 +660,20 @@ export async function saveStationScan(client: SupabaseClient, payload: ScanPaylo
   const dayTotal = await getDayTotal(client, rpcRow.evento_id);
   const hourGoal = await getHourGoalForRegister(client, rpcRow.registro_horario_id);
   const event = eventData ? normalizeEvent(eventData) : null;
-  const canonicalProduct = event?.products ?? product;
+  const canonicalProduct = event?.products ?? null;
+  const normalizedCode = event?.codigo_normalizado || event?.codigo || barcode;
+  const unidentified = !canonicalProduct || event?.estado_identificacion === "pendiente" || !rpcRow.producto_id;
 
   return {
-    productId: canonicalProduct.id,
-    product: formatProduct(canonicalProduct),
+    productId: canonicalProduct?.id ?? null,
+    product: canonicalProduct ? formatProduct(canonicalProduct) : "Codigo " + normalizedCode + " - Producto pendiente de identificar",
+    code: normalizedCode,
     scannedAt: event?.hora_registro ?? new Date().toISOString(),
     hourTotal: rpcRow.pares_bloque,
     hourGoal,
     dayTotal,
-    duplicate: rpcRow.duplicado
+    duplicate: rpcRow.duplicado,
+    unidentified
   };
 }
 
@@ -740,11 +747,13 @@ export async function saveManualAdjustment(
   return {
     productId: product.id,
     product: formatProduct(product),
+    code: product.codigo_id,
     scannedAt: (correctionData as { created_at?: string } | null)?.created_at ?? new Date().toISOString(),
     hourTotal: status.hourTotal,
     hourGoal: status.hourGoal,
     dayTotal: status.dayTotal,
-    duplicate: rpcRow.duplicado
+    duplicate: rpcRow.duplicado,
+    unidentified: false
   };
 }
 
@@ -873,7 +882,7 @@ export async function getRecentScans(client: SupabaseClient, profile: StationPro
 
   const { data, error } = await client
     .from("produccion_eventos")
-    .select("id,codigo,hora_registro,hora_local,producto_id,cantidad,estado,origen,productos(id,codigo_id,cliente_marca,modelo,color,talla,estado)")
+    .select("id,codigo,codigo_normalizado,estado_identificacion,hora_registro,hora_local,producto_id,cantidad,estado,origen,productos(id,codigo_id,cliente_marca,modelo,color,talla,estado)")
     .eq("jornada_id", jornada.id)
     .eq("banda", profile.bandId)
     .order("hora_registro", { ascending: false })
@@ -889,10 +898,11 @@ export async function getRecentScans(client: SupabaseClient, profile: StationPro
 
   return ((data ?? []) as unknown[]).map((row) => {
     const event = normalizeEvent(row);
+    const normalizedCode = event.codigo_normalizado || event.codigo;
     return {
       id: event.id,
-      productId: event.producto_id ?? "",
-      product: event.products ? formatProduct(event.products) : event.codigo,
+      productId: event.producto_id ?? null,
+      product: event.products ? formatProduct(event.products) : "Codigo " + normalizedCode + " - Producto pendiente de identificar",
       scannedAt: event.hora_registro,
       quantity: event.estado === "anulado" ? -1 : 1,
       status: event.origen === "ajuste_manual" ? "adjusted" : event.estado === "activo" ? "saved" : "rejected",
@@ -1234,17 +1244,6 @@ type ProductResolutionInternal = {
   stage: ProductResolutionData["stage"];
 };
 
-async function findActiveProductByCode(client: SupabaseClient, barcode: string): Promise<ProductoRow> {
-  const resolved = await resolveProductByCode(client, barcode);
-  if (!resolved.product) {
-    throw new StationScanError("PRODUCT_NOT_FOUND", "Codigo no reconocido", 404);
-  }
-  if (resolved.product.estado !== "activo") {
-    throw new StationScanError("PRODUCT_INACTIVE", "Producto inactivo", 409);
-  }
-  return resolved.product;
-}
-
 async function resolveProductByCode(client: SupabaseClient, barcode: string): Promise<ProductResolutionInternal> {
   const { data: direct, error: directError } = await client
     .from("productos")
@@ -1281,7 +1280,9 @@ async function resolveProductByCode(client: SupabaseClient, barcode: string): Pr
 }
 
 export function normalizeScannedCode(value: string): string {
-  return value.trim().replace(/[\r\n]+/g, "");
+  return value
+    .replace(/^[\s\u200b-\u200d\ufeff]+|[\s\u200b-\u200d\ufeff]+$/g, "")
+    .replace(/[\r\n\t\u200b-\u200d\ufeff]+/g, "");
 }
 
 async function assertScannerReady(client: SupabaseClient, profile: StationProfile): Promise<void> {

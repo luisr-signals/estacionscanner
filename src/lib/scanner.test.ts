@@ -6,6 +6,7 @@ describe("scanner capture helpers", () => {
     expect(normalizeBarcode(" 0888930260 \n")).toBe("0888930260");
     expect(normalizeBarcode("0888930260")).toHaveLength(10);
     expect(normalizeBarcode("0888 930260")).toBe("0888 930260");
+    expect(normalizeBarcode("0888\n930260")).toBe("0888\n930260");
     expect(normalizeBarcode("0888930260\n")).not.toBe("888930260");
   });
 
@@ -14,6 +15,15 @@ describe("scanner capture helpers", () => {
     expect(canSubmitScan("", false, true)).toBe(false);
     expect(canSubmitScan("123", true, true)).toBe(false);
     expect(canSubmitScan("123", false, false)).toBe(false);
+  });
+
+  it("keeps ten consecutive scanner reads as the same complete string", () => {
+    const code = "0888930270";
+    const captures = Array.from({ length: 10 }, () => normalizeBarcode(code));
+
+    expect(captures).toHaveLength(10);
+    expect(captures.every((capture) => capture === code)).toBe(true);
+    expect(captures.every((capture) => capture !== "0" && capture.length === 10)).toBe(true);
   });
 
   it("creates unique client scan ids", () => {

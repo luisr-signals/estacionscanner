@@ -1,9 +1,7 @@
 export type ScannerState = "ready" | "waiting" | "success" | "error" | "offline" | "paused";
 
 export function normalizeBarcode(value: string): string {
-  return value
-    .replace(/^[\s\u200b-\u200d\ufeff]+|[\s\u200b-\u200d\ufeff]+$/g, "")
-    .replace(/[\r\n\t\u200b-\u200d\ufeff]+/g, "");
+  return value.trim();
 }
 
 export function canSubmitScan(value: string, isBusy: boolean, isOnline: boolean): boolean {

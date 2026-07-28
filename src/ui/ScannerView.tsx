@@ -1,4 +1,4 @@
-import { KeyboardEvent, MouseEvent, useCallback, useEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, MouseEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
   getManualProducts,
   getRecent,
@@ -152,12 +152,21 @@ export function ScannerView({ onLogout }: Props) {
   function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
     if (event.key !== "Enter") return;
     event.preventDefault();
-    processScan();
+    processScan(event.currentTarget.value, event.key);
   }
 
-  function processScan() {
-    if (busyRef.current) return;
+  function handleInput(event: FormEvent<HTMLInputElement>) {
+    setBarcode(event.currentTarget.value);
+  }
+
+  function processScan(rawBarcode: string, triggerKey: string) {
+    const capturedBarcode = rawBarcode;
+    if (busyRef.current) {
+      logScanInput("blocked_duplicate", capturedBarcode, triggerKey);
+      return;
+    }
     if (!status || status.scannerStatus !== "ready") {
+      logScanInput("blocked_not_ready", capturedBarcode, triggerKey);
       showNotice(
         {
           tone: "offline",
@@ -169,24 +178,26 @@ export function ScannerView({ onLogout }: Props) {
       focusInput();
       return;
     }
-    if (!canSubmitScan(barcode, busy, online)) {
+    if (!canSubmitScan(capturedBarcode, busy, online)) {
+      logScanInput("blocked_invalid", capturedBarcode, triggerKey);
       if (!online) showNotice({ tone: "offline", title: "Sin conexion", detail: "Reintenta cuando vuelva la red" }, false);
       focusInput();
       return;
     }
 
-    const cleanBarcode = normalizeBarcode(barcode);
+    const cleanBarcode = normalizeBarcode(capturedBarcode);
+    logScanInput("accepted", cleanBarcode, triggerKey);
     const scanId = createScanId();
     busyRef.current = true;
     setBusy(true);
     setScannerState("waiting");
+    setBarcode("");
     showNotice({ tone: "waiting", title: "Guardando registro...", detail: cleanBarcode }, false);
 
     submitScan(cleanBarcode, scanId)
       .then((result) => {
         if (result.ok) {
           setScannerState("success");
-          setBarcode("");
           setTotals({ hourTotal: result.hourTotal, hourGoal: result.hourGoal });
           showNotice(
             {
@@ -342,7 +353,7 @@ export function ScannerView({ onLogout }: Props) {
             id="barcode"
             inputMode="none"
             onBlur={focusInput}
-            onChange={(event) => setBarcode(event.target.value)}
+            onInput={handleInput}
             onKeyDown={handleKeyDown}
             placeholder="El lector escribe aqui y envia Enter"
             type="text"
@@ -485,6 +496,16 @@ export function ScannerView({ onLogout }: Props) {
 }
 
 export default ScannerView;
+
+function logScanInput(status: "accepted" | "blocked_duplicate" | "blocked_invalid" | "blocked_not_ready", value: string, key: string) {
+  console.info("[scanner-input]", {
+    value,
+    length: value.length,
+    key,
+    time: new Date().toISOString(),
+    status
+  });
+}
 
 function dotStatus(status: StationStatus | null, online: boolean) {
   if (!online) return "offline";

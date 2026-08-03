@@ -13,6 +13,7 @@ import {
 } from "../lib/api";
 import { canConfirmAdjustment, RecentProduct } from "../lib/manual";
 import { canSubmitScan, createScanId, normalizeBarcode, scannerTone, ScannerState } from "../lib/scanner";
+import { supabase } from "../lib/supabaseClient";
 
 type Props = {
   onLogout: () => void;
@@ -29,6 +30,12 @@ type ManualAction = "add" | "remove";
 type Totals = {
   hourTotal: number;
   hourGoal: number | null;
+};
+
+type DefectoInfo = {
+  codigo: string;
+  nombre: string;
+  categoria: string;
 };
 
 const emptyTotals: Totals = { hourTotal: 0, hourGoal: null };
@@ -53,6 +60,10 @@ export function ScannerView({ onLogout }: Props) {
   const [manualProducts, setManualProducts] = useState<ManualProduct[]>([]);
   const [manualLoading, setManualLoading] = useState(false);
   const [manualError, setManualError] = useState<string | null>(null);
+
+  // ========== ESTADO PARA DEFECTOS ==========
+  const [ultimoPar, setUltimoPar] = useState<string | null>(null);
+  const [defectoPendiente, setDefectoPendiente] = useState<DefectoInfo | null>(null);
 
   const focusInput = useCallback(() => {
     if (manualOpen) return;
@@ -149,18 +160,178 @@ export function ScannerView({ onLogout }: Props) {
     }, tone.durationMs);
   }
 
-  function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
-    if (event.key !== "Enter") return;
-    event.preventDefault();
-    processScan(event.currentTarget.value, event.key);
+  // ========== FUNCIÓN: OBTENER DATOS DEL DEFECTO DESDE SUPABASE ==========
+  async function obtenerDefecto(codigo: string): Promise<DefectoInfo | null> {
+    try {
+      const { data, error } = await supabase
+        .from('defectos')
+        .select('codigo, nombre, categoria')
+        .eq('codigo', codigo)
+        .single();
+
+      if (error) {
+        console.error('Error al buscar defecto:', error);
+        return null;
+      }
+
+      return data;
+    } catch (error) {
+      console.error('Error inesperado:', error);
+      return null;
+    }
   }
 
-  function handleInput(event: FormEvent<HTMLInputElement>) {
-    setBarcode(event.currentTarget.value);
+  // ========== FUNCIÓN: REGISTRAR DEFECTO EN SUPABASE ==========
+  async function registrarDefecto(defectoInfo: DefectoInfo, parCodigo: string) {
+    try {
+      // 1. Obtener el ID del par
+      const { data: parData, error: parError } = await supabase
+        .from('pares')
+        .select('id')
+        .eq('codigo_barras', parCodigo)
+        .single();
+
+      if (parError) {
+        console.error('Error al buscar par:', parError);
+        return { ok: false, message: 'Par no encontrado' };
+      }
+
+      // 2. Obtener el ID del defecto
+      const { data: defectoData, error: defectoError } = await supabase
+        .from('defectos')
+        .select('id')
+        .eq('codigo', defectoInfo.codigo)
+        .single();
+
+      if (defectoError) {
+        console.error('Error al buscar defecto:', defectoError);
+        return { ok: false, message: 'Defecto no encontrado en catálogo' };
+      }
+
+      // 3. Insertar el registro de calidad
+      const { error: insertError } = await supabase
+        .from('registros_calidad')
+        .insert({
+          par_id: parData.id,
+          defecto_id: defectoData.id,
+          registrado_por: 'stacion_337',
+          fecha_registro: new Date().toISOString()
+        });
+
+      if (insertError) {
+        console.error('Error al insertar defecto:', insertError);
+        return { ok: false, message: 'Error al guardar el defecto' };
+      }
+
+      return { ok: true, nombre: defectoInfo.nombre, categoria: defectoInfo.categoria };
+    } catch (error) {
+      console.error('Error inesperado:', error);
+      return { ok: false, message: 'Error inesperado' };
+    }
   }
 
+  // ========== FUNCIÓN: PROCESAR ESCANEO (MODIFICADA) ==========
   function processScan(rawBarcode: string, triggerKey: string) {
-    const capturedBarcode = rawBarcode;
+    const capturedBarcode = rawBarcode.trim();
+
+    // =============================================
+    // 1. ¿ES UN CÓDIGO DE DEFECTO? (Empieza con DEF-)
+    // =============================================
+    if (capturedBarcode.startsWith('DEF-')) {
+      // Verificar que haya un último par escaneado
+      if (!ultimoPar) {
+        showNotice({
+          tone: "error",
+          title: "❌ Error: No hay par escaneado",
+          detail: "Escanea primero un par antes de registrar un defecto."
+        }, false);
+        playTone("error");
+        focusInput();
+        return;
+      }
+
+      // Buscar el defecto en Supabase para obtener su nombre
+      obtenerDefecto(capturedBarcode).then((defectoInfo) => {
+        if (!defectoInfo) {
+          showNotice({
+            tone: "error",
+            title: "❌ Defecto no reconocido",
+            detail: `El código "${capturedBarcode}" no existe en el catálogo.`
+          }, false);
+          playTone("error");
+          focusInput();
+          return;
+        }
+
+        // PRIMER ESCANEO: No hay defecto pendiente
+        if (defectoPendiente === null) {
+          setDefectoPendiente(defectoInfo);
+          showNotice({
+            tone: "waiting",
+            title: `⏳ Defecto pendiente: ${defectoInfo.nombre}`,
+            detail: `Categoría: ${defectoInfo.categoria} · Escanea de nuevo para confirmar`
+          }, false);
+          playTone("waiting");
+          focusInput();
+          return;
+        }
+
+        // SEGUNDO ESCANEO: Confirmación (mismo código)
+        if (defectoPendiente.codigo === capturedBarcode) {
+          registrarDefecto(defectoInfo, ultimoPar).then((result) => {
+            if (result.ok) {
+              showNotice({
+                tone: "success",
+                title: `✅ Defecto registrado: ${result.nombre}`,
+                detail: `Categoría: ${result.categoria} · Par: ${ultimoPar}`
+              }, true);
+              playTone("success");
+              setDefectoPendiente(null);
+              refresh();
+            } else {
+              showNotice({
+                tone: "error",
+                title: "❌ Error al registrar defecto",
+                detail: result.message || "Intenta nuevamente"
+              }, false);
+              playTone("error");
+              setDefectoPendiente(null);
+            }
+          });
+          focusInput();
+          return;
+        }
+
+        // ESCANEO DE UN DEFECTO DIFERENTE AL PENDIENTE
+        if (defectoPendiente !== null && defectoPendiente.codigo !== capturedBarcode) {
+          setDefectoPendiente(defectoInfo);
+          showNotice({
+            tone: "waiting",
+            title: `🔄 Defecto cambiado: ${defectoInfo.nombre}`,
+            detail: `Categoría: ${defectoInfo.categoria} · Escanea de nuevo para confirmar.`
+          }, false);
+          playTone("waiting");
+          focusInput();
+          return;
+        }
+      });
+
+      return;
+    }
+
+    // =============================================
+    // 2. ES UN CÓDIGO DE PAR (PRODUCCIÓN)
+    // =============================================
+    
+    // Resetear defecto pendiente al escanear un nuevo par
+    if (defectoPendiente !== null) {
+      setDefectoPendiente(null);
+    }
+
+    // Guardar el código como último par escaneado
+    setUltimoPar(capturedBarcode);
+
+    // --- FLUJO ORIGINAL DE PRODUCCIÓN ---
     if (busyRef.current) {
       logScanInput("blocked_duplicate", capturedBarcode, triggerKey);
       return;
@@ -236,6 +407,16 @@ export function ScannerView({ onLogout }: Props) {
         setBusy(false);
         focusInput();
       });
+  }
+
+  function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    processScan(event.currentTarget.value, event.key);
+  }
+
+  function handleInput(event: FormEvent<HTMLInputElement>) {
+    setBarcode(event.currentTarget.value);
   }
 
   function openManualPanel() {
@@ -496,6 +677,8 @@ export function ScannerView({ onLogout }: Props) {
 }
 
 export default ScannerView;
+
+// ========== FUNCIONES AUXILIARES (sin cambios) ==========
 
 function logScanInput(status: "accepted" | "blocked_duplicate" | "blocked_invalid" | "blocked_not_ready", value: string, key: string) {
   console.info("[scanner-input]", {

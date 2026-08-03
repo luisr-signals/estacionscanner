@@ -516,8 +516,8 @@ export function ScannerView({ onLogout }: Props) {
             className="hour-good-line"
             style={{ display: "block", marginTop: "0.4rem", fontSize: "0.85rem", opacity: 0.9 }}
           >
-            Buenos <strong>{Math.max(totals.hourTotal - totals.hourDefects, 0)}</strong>
-            {totals.hourDefects > 0 ? " · Defectos " + totals.hourDefects : ""}
+            Buenos <strong>{Math.max(0, totals.hourTotal - totals.hourDefects)}</strong>
+            {" · Defectos " + totals.hourDefects}
           </span>
         </aside>
       </section>

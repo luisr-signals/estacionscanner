@@ -305,6 +305,7 @@ export class StationScanError extends Error {
       | "DEFECT_NOT_FOUND"
       | "DEFECT_PERMISSION_DENIED"
       | "DEFECT_LOOKUP_FAILED"
+      | "DEFECT_NOT_CONFIGURED"
       | "PAIR_NOT_FOUND"
       | "DEFECT_REGISTER_FAILED",
     message: string,
@@ -961,25 +962,35 @@ export async function getManualProducts(client: SupabaseClient, profile: Station
 export type QualityDefectData = {
   codigo: string;
   nombre: string;
-  categoria: string;
 };
 
-type DefectoRow = { id: string; codigo: string; nombre: string; categoria: string };
+export type QualityDefectRegistration = {
+  nombre: string;
+  modelo: string | null;
+  duplicado: boolean;
+};
 
-async function fetchDefecto(client: SupabaseClient, defectoCodigo: string): Promise<DefectoRow> {
-  const codigo = defectoCodigo.trim();
+// El catalogo de defectos vive en DinoCore (calidad_defectos_catalogo) y tiene
+// RLS de solo lectura para cualquier authenticated, asi que el scanner puede
+// leerlo directo para mostrar el nombre en el primer escaneo. La ESCRITURA en
+// cambio pasa por la RPC registrar_defecto_scanner (SECURITY DEFINER, ver
+// supabase/migrations/0031 de DinoCore): la RLS de calidad_perdidas es
+// admin-only y un insert directo del scanner seria rechazado.
+export async function resolveQualityDefect(client: SupabaseClient, defectoCodigo: string): Promise<QualityDefectData> {
+  const codigo = defectoCodigo.trim().toUpperCase();
   if (!codigo) {
     throw new StationScanError("DEFECT_NOT_FOUND", "Codigo de defecto invalido.", 400);
   }
 
   const { data, error } = await client
-    .from("defectos")
-    .select("id,codigo,nombre,categoria")
+    .from("calidad_defectos_catalogo")
+    .select("codigo,nombre")
     .eq("codigo", codigo)
+    .eq("activo", true)
     .maybeSingle();
 
   if (error) {
-    logStationIssue("defectos.select", classifySupabaseError(error), { supabaseCode: error.code ?? null });
+    logStationIssue("calidad_defectos_catalogo.select", classifySupabaseError(error), { supabaseCode: error.code ?? null });
     if (error.code === "42501" || /permission|rls|policy/i.test(error.message ?? "")) {
       throw new StationScanError("DEFECT_PERMISSION_DENIED", "Permiso insuficiente para leer el catalogo de defectos.", 403);
     }
@@ -989,59 +1000,67 @@ async function fetchDefecto(client: SupabaseClient, defectoCodigo: string): Prom
     throw new StationScanError("DEFECT_NOT_FOUND", "El codigo de defecto no existe en el catalogo.", 404);
   }
 
-  return data as DefectoRow;
+  const row = data as { codigo: string; nombre: string };
+  return { codigo: row.codigo, nombre: row.nombre };
 }
 
-export async function resolveQualityDefect(client: SupabaseClient, defectoCodigo: string): Promise<QualityDefectData> {
-  const row = await fetchDefecto(client, defectoCodigo);
-  return { codigo: row.codigo, nombre: row.nombre, categoria: row.categoria };
-}
+type RegistrarDefectoRpcRow = {
+  perdida_id: string;
+  defecto_id: string;
+  defecto_nombre: string;
+  modelo: string | null;
+  producto_nombre: string | null;
+  duplicado: boolean;
+};
 
 export async function registerQualityDefect(
   client: SupabaseClient,
-  params: { defectoCodigo: string; parCodigo: string; profile: StationProfile }
-): Promise<QualityDefectData> {
+  params: { defectoCodigo: string; parCodigo: string; clienteUuid: string; profile: StationProfile }
+): Promise<QualityDefectRegistration> {
   const parCodigo = params.parCodigo.trim();
   if (!parCodigo) {
     throw new StationScanError("PAIR_NOT_FOUND", "No hay par escaneado.", 400);
   }
-
-  // El par y el defecto se resuelven en paralelo (un solo viaje de ida y vuelta).
-  const [parResult, defecto] = await Promise.all([
-    client.from("pares").select("id").eq("codigo_barras", parCodigo).maybeSingle(),
-    fetchDefecto(client, params.defectoCodigo)
-  ]);
-
-  if (parResult.error) {
-    logStationIssue("pares.select", classifySupabaseError(parResult.error), {
-      supabaseCode: parResult.error.code ?? null
-    });
-    throw new StationScanError("DEFECT_REGISTER_FAILED", "No fue posible validar el par escaneado.", 500, true);
-  }
-  const par = parResult.data as { id: string } | null;
-  if (!par) {
-    throw new StationScanError("PAIR_NOT_FOUND", "El par escaneado no existe en la base.", 404);
+  if (!isUuid(params.clienteUuid.trim())) {
+    throw new StationScanError("INVALID_ADJUSTMENT_ID", "Identificador de registro invalido.", 400);
   }
 
-  const { error: insertError } = await client.from("registros_calidad").insert({
-    par_id: par.id,
-    defecto_id: defecto.id,
-    registrado_por: params.profile.stationId,
-    fecha_registro: new Date().toISOString()
+  const { data, error } = await client.rpc("registrar_defecto_scanner", {
+    p_cliente_uuid: params.clienteUuid.trim(),
+    p_codigo_defecto: params.defectoCodigo.trim().toUpperCase(),
+    p_codigo_par: parCodigo
   });
 
-  if (insertError) {
-    logStationIssue("registros_calidad.insert", classifySupabaseError(insertError), {
+  if (error) {
+    const message = error.message ?? "";
+    logStationIssue("registrar_defecto_scanner.rpc", error.code ?? "RPC_ERROR", {
       userId: params.profile.userId,
-      supabaseCode: insertError.code ?? null
+      supabaseCode: error.code ?? null
     });
-    if (insertError.code === "42501" || /permission|rls|policy/i.test(insertError.message ?? "")) {
+    if (error.code === "42501" || /autorizado|permission|permiso/i.test(message)) {
       throw new StationScanError("DEFECT_PERMISSION_DENIED", "Esta cuenta no tiene permiso para registrar defectos.", 403);
+    }
+    if (error.code === "42883" || error.code === "PGRST202" || /function .* does not exist|could not find.*function|schema cache/i.test(message)) {
+      throw new StationScanError("DEFECT_NOT_CONFIGURED", "Falta aplicar la migracion 0031 (registrar_defecto_scanner) en Supabase.", 501);
+    }
+    if (/Defecto no encontrado/i.test(message)) {
+      throw new StationScanError("DEFECT_NOT_FOUND", "El codigo de defecto no existe en el catalogo.", 404);
+    }
+    if (/jornada/i.test(message)) {
+      throw new StationScanError("NO_ACTIVE_SHIFT", "No hay jornada activa para esta banda.", 409);
+    }
+    if (/bloque/i.test(message)) {
+      throw new StationScanError("OUTSIDE_HOUR_BLOCK", "Fuera de bloque horario.", 409);
     }
     throw new StationScanError("DEFECT_REGISTER_FAILED", "No fue posible guardar el defecto.", 500, true);
   }
 
-  return { codigo: defecto.codigo, nombre: defecto.nombre, categoria: defecto.categoria };
+  const row = (Array.isArray(data) ? data[0] : data) as RegistrarDefectoRpcRow | undefined;
+  if (!row || !row.defecto_nombre) {
+    throw new StationScanError("DEFECT_REGISTER_FAILED", "La respuesta del registro no fue valida.", 500, true);
+  }
+
+  return { nombre: row.defecto_nombre, modelo: row.modelo ?? null, duplicado: Boolean(row.duplicado) };
 }
 
 export function schemaMappingMessage() {

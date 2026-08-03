@@ -36,7 +36,6 @@ type Totals = {
 type DefectoInfo = {
   codigo: string;
   nombre: string;
-  categoria: string;
 };
 
 const emptyTotals: Totals = { hourTotal: 0, hourGoal: null };
@@ -161,12 +160,19 @@ export function ScannerView({ onLogout }: Props) {
     }, tone.durationMs);
   }
 
+  // Pitido doble para confirmar el registro de un defecto (dos "success"
+  // seguidos), distinguible del pitido único de un escaneo de par normal.
+  function playDoubleTone(state: ScannerState) {
+    playTone(state);
+    window.setTimeout(() => playTone(state), 180);
+  }
+
   // ========== FUNCIÓN: OBTENER DATOS DEL DEFECTO (vía endpoint serverless) ==========
   async function obtenerDefecto(codigo: string): Promise<DefectoInfo | null> {
     try {
       const result = await lookupDefect(codigo);
       if (!result.ok) return null;
-      return { codigo: result.codigo, nombre: result.nombre, categoria: result.categoria };
+      return { codigo: result.codigo, nombre: result.nombre };
     } catch (error) {
       console.error('Error al buscar defecto:', error);
       return null;
@@ -174,15 +180,17 @@ export function ScannerView({ onLogout }: Props) {
   }
 
   // ========== FUNCIÓN: REGISTRAR DEFECTO (vía endpoint serverless) ==========
-  // El servidor resuelve par + defecto en paralelo e inserta en registros_calidad
-  // dentro de la misma red de Supabase: una sola petición desde el navegador.
+  // El servidor llama a la RPC registrar_defecto_scanner (SECURITY DEFINER en
+  // DinoCore), que resuelve jornada+bloque+producto e inserta en
+  // calidad_perdidas — la tabla que lee el módulo de Calidad de DinoCore.
   async function registrarDefecto(defectoInfo: DefectoInfo, parCodigo: string) {
     try {
-      const result = await submitDefect(defectoInfo.codigo, parCodigo);
+      const clienteUuid = createScanId();
+      const result = await submitDefect(defectoInfo.codigo, parCodigo, clienteUuid);
       if (!result.ok) {
         return { ok: false as const, message: result.message || 'No se pudo registrar el defecto' };
       }
-      return { ok: true as const, nombre: result.nombre, categoria: result.categoria };
+      return { ok: true as const, nombre: result.nombre, modelo: result.modelo };
     } catch (error) {
       console.error('Error al registrar defecto:', error);
       return { ok: false as const, message: 'Sin conexion. No se confirmo el defecto.' };
@@ -228,7 +236,7 @@ export function ScannerView({ onLogout }: Props) {
           showNotice({
             tone: "waiting",
             title: `⏳ Defecto pendiente: ${defectoInfo.nombre}`,
-            detail: `Categoría: ${defectoInfo.categoria} · Escanea de nuevo para confirmar`
+            detail: "Escanea de nuevo el mismo defecto para confirmar"
           }, false);
           playTone("waiting");
           focusInput();
@@ -242,9 +250,9 @@ export function ScannerView({ onLogout }: Props) {
               showNotice({
                 tone: "success",
                 title: `✅ Defecto registrado: ${result.nombre}`,
-                detail: `Categoría: ${result.categoria} · Par: ${ultimoPar}`
+                detail: `en ${result.modelo ?? "modelo sin identificar"}`
               }, true);
-              playTone("success");
+              playDoubleTone("success");
               setDefectoPendiente(null);
               refresh();
             } else {
@@ -267,7 +275,7 @@ export function ScannerView({ onLogout }: Props) {
           showNotice({
             tone: "waiting",
             title: `🔄 Defecto cambiado: ${defectoInfo.nombre}`,
-            detail: `Categoría: ${defectoInfo.categoria} · Escanea de nuevo para confirmar.`
+            detail: "Escanea de nuevo el mismo defecto para confirmar."
           }, false);
           playTone("waiting");
           focusInput();

@@ -181,11 +181,11 @@ export function submitAdjustment(productId: string, quantity: MovementQuantity, 
 }
 
 export type DefectLookup =
-  | { ok: true; codigo: string; nombre: string; categoria: string }
+  | { ok: true; codigo: string; nombre: string }
   | { ok: false; code: string; message: string };
 
 export type DefectRegistration =
-  | { ok: true; registered: true; codigo: string; nombre: string; categoria: string }
+  | { ok: true; registered: true; nombre: string; modelo: string | null; duplicado: boolean }
   | { ok: false; code: string; message: string; retryable?: boolean };
 
 export function lookupDefect(defectoCodigo: string) {
@@ -195,9 +195,9 @@ export function lookupDefect(defectoCodigo: string) {
   });
 }
 
-export function submitDefect(defectoCodigo: string, parCodigo: string) {
+export function submitDefect(defectoCodigo: string, parCodigo: string, clienteUuid: string) {
   return requestJson<DefectRegistration>("/api/station/defect", {
     method: "POST",
-    body: JSON.stringify({ mode: "register", defectoCodigo, parCodigo })
+    body: JSON.stringify({ mode: "register", defectoCodigo, parCodigo, clienteUuid })
   });
 }

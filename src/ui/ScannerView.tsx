@@ -4,16 +4,17 @@ import {
   getRecent,
   getStatus,
   logout,
+  lookupDefect,
   ManualProduct,
   MovementQuantity,
   RecentScan,
   StationStatus,
   submitAdjustment,
+  submitDefect,
   submitScan
 } from "../lib/api";
 import { canConfirmAdjustment, RecentProduct } from "../lib/manual";
 import { canSubmitScan, createScanId, normalizeBarcode, scannerTone, ScannerState } from "../lib/scanner";
-import { supabase } from "../lib/supabaseClient";
 
 type Props = {
   onLogout: () => void;
@@ -160,73 +161,31 @@ export function ScannerView({ onLogout }: Props) {
     }, tone.durationMs);
   }
 
-  // ========== FUNCIÓN: OBTENER DATOS DEL DEFECTO DESDE SUPABASE ==========
+  // ========== FUNCIÓN: OBTENER DATOS DEL DEFECTO (vía endpoint serverless) ==========
   async function obtenerDefecto(codigo: string): Promise<DefectoInfo | null> {
     try {
-      const { data, error } = await supabase
-        .from('defectos')
-        .select('codigo, nombre, categoria')
-        .eq('codigo', codigo)
-        .single();
-
-      if (error) {
-        console.error('Error al buscar defecto:', error);
-        return null;
-      }
-
-      return data;
+      const result = await lookupDefect(codigo);
+      if (!result.ok) return null;
+      return { codigo: result.codigo, nombre: result.nombre, categoria: result.categoria };
     } catch (error) {
-      console.error('Error inesperado:', error);
+      console.error('Error al buscar defecto:', error);
       return null;
     }
   }
 
-  // ========== FUNCIÓN: REGISTRAR DEFECTO EN SUPABASE ==========
+  // ========== FUNCIÓN: REGISTRAR DEFECTO (vía endpoint serverless) ==========
+  // El servidor resuelve par + defecto en paralelo e inserta en registros_calidad
+  // dentro de la misma red de Supabase: una sola petición desde el navegador.
   async function registrarDefecto(defectoInfo: DefectoInfo, parCodigo: string) {
     try {
-      // 1. Obtener el ID del par
-      const { data: parData, error: parError } = await supabase
-        .from('pares')
-        .select('id')
-        .eq('codigo_barras', parCodigo)
-        .single();
-
-      if (parError) {
-        console.error('Error al buscar par:', parError);
-        return { ok: false, message: 'Par no encontrado' };
+      const result = await submitDefect(defectoInfo.codigo, parCodigo);
+      if (!result.ok) {
+        return { ok: false as const, message: result.message || 'No se pudo registrar el defecto' };
       }
-
-      // 2. Obtener el ID del defecto
-      const { data: defectoData, error: defectoError } = await supabase
-        .from('defectos')
-        .select('id')
-        .eq('codigo', defectoInfo.codigo)
-        .single();
-
-      if (defectoError) {
-        console.error('Error al buscar defecto:', defectoError);
-        return { ok: false, message: 'Defecto no encontrado en catálogo' };
-      }
-
-      // 3. Insertar el registro de calidad
-      const { error: insertError } = await supabase
-        .from('registros_calidad')
-        .insert({
-          par_id: parData.id,
-          defecto_id: defectoData.id,
-          registrado_por: 'stacion_337',
-          fecha_registro: new Date().toISOString()
-        });
-
-      if (insertError) {
-        console.error('Error al insertar defecto:', insertError);
-        return { ok: false, message: 'Error al guardar el defecto' };
-      }
-
-      return { ok: true, nombre: defectoInfo.nombre, categoria: defectoInfo.categoria };
+      return { ok: true as const, nombre: result.nombre, categoria: result.categoria };
     } catch (error) {
-      console.error('Error inesperado:', error);
-      return { ok: false, message: 'Error inesperado' };
+      console.error('Error al registrar defecto:', error);
+      return { ok: false as const, message: 'Sin conexion. No se confirmo el defecto.' };
     }
   }
 

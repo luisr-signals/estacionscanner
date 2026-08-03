@@ -301,7 +301,12 @@ export class StationScanError extends Error {
       | "ADJUSTMENT_NOT_CONFIGURED"
       | "ADJUSTMENT_FAILED"
       | "SCAN_WRITE_FAILED"
-      | "SCAN_FAILED",
+      | "SCAN_FAILED"
+      | "DEFECT_NOT_FOUND"
+      | "DEFECT_PERMISSION_DENIED"
+      | "DEFECT_LOOKUP_FAILED"
+      | "PAIR_NOT_FOUND"
+      | "DEFECT_REGISTER_FAILED",
     message: string,
     public status: number,
     public retryable = false
@@ -951,6 +956,92 @@ export async function getManualProducts(client: SupabaseClient, profile: Station
   }
 
   return [...grouped.values()];
+}
+
+export type QualityDefectData = {
+  codigo: string;
+  nombre: string;
+  categoria: string;
+};
+
+type DefectoRow = { id: string; codigo: string; nombre: string; categoria: string };
+
+async function fetchDefecto(client: SupabaseClient, defectoCodigo: string): Promise<DefectoRow> {
+  const codigo = defectoCodigo.trim();
+  if (!codigo) {
+    throw new StationScanError("DEFECT_NOT_FOUND", "Codigo de defecto invalido.", 400);
+  }
+
+  const { data, error } = await client
+    .from("defectos")
+    .select("id,codigo,nombre,categoria")
+    .eq("codigo", codigo)
+    .maybeSingle();
+
+  if (error) {
+    logStationIssue("defectos.select", classifySupabaseError(error), { supabaseCode: error.code ?? null });
+    if (error.code === "42501" || /permission|rls|policy/i.test(error.message ?? "")) {
+      throw new StationScanError("DEFECT_PERMISSION_DENIED", "Permiso insuficiente para leer el catalogo de defectos.", 403);
+    }
+    throw new StationScanError("DEFECT_LOOKUP_FAILED", "No fue posible leer el catalogo de defectos.", 500, true);
+  }
+  if (!data) {
+    throw new StationScanError("DEFECT_NOT_FOUND", "El codigo de defecto no existe en el catalogo.", 404);
+  }
+
+  return data as DefectoRow;
+}
+
+export async function resolveQualityDefect(client: SupabaseClient, defectoCodigo: string): Promise<QualityDefectData> {
+  const row = await fetchDefecto(client, defectoCodigo);
+  return { codigo: row.codigo, nombre: row.nombre, categoria: row.categoria };
+}
+
+export async function registerQualityDefect(
+  client: SupabaseClient,
+  params: { defectoCodigo: string; parCodigo: string; profile: StationProfile }
+): Promise<QualityDefectData> {
+  const parCodigo = params.parCodigo.trim();
+  if (!parCodigo) {
+    throw new StationScanError("PAIR_NOT_FOUND", "No hay par escaneado.", 400);
+  }
+
+  // El par y el defecto se resuelven en paralelo (un solo viaje de ida y vuelta).
+  const [parResult, defecto] = await Promise.all([
+    client.from("pares").select("id").eq("codigo_barras", parCodigo).maybeSingle(),
+    fetchDefecto(client, params.defectoCodigo)
+  ]);
+
+  if (parResult.error) {
+    logStationIssue("pares.select", classifySupabaseError(parResult.error), {
+      supabaseCode: parResult.error.code ?? null
+    });
+    throw new StationScanError("DEFECT_REGISTER_FAILED", "No fue posible validar el par escaneado.", 500, true);
+  }
+  const par = parResult.data as { id: string } | null;
+  if (!par) {
+    throw new StationScanError("PAIR_NOT_FOUND", "El par escaneado no existe en la base.", 404);
+  }
+
+  const { error: insertError } = await client.from("registros_calidad").insert({
+    par_id: par.id,
+    defecto_id: defecto.id,
+    registrado_por: params.profile.stationId,
+    fecha_registro: new Date().toISOString()
+  });
+
+  if (insertError) {
+    logStationIssue("registros_calidad.insert", classifySupabaseError(insertError), {
+      userId: params.profile.userId,
+      supabaseCode: insertError.code ?? null
+    });
+    if (insertError.code === "42501" || /permission|rls|policy/i.test(insertError.message ?? "")) {
+      throw new StationScanError("DEFECT_PERMISSION_DENIED", "Esta cuenta no tiene permiso para registrar defectos.", 403);
+    }
+    throw new StationScanError("DEFECT_REGISTER_FAILED", "No fue posible guardar el defecto.", 500, true);
+  }
+
+  return { codigo: defecto.codigo, nombre: defecto.nombre, categoria: defecto.categoria };
 }
 
 export function schemaMappingMessage() {

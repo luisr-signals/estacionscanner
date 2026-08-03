@@ -179,3 +179,25 @@ export function submitAdjustment(productId: string, quantity: MovementQuantity, 
     body: JSON.stringify({ productId, quantity, adjustmentId })
   });
 }
+
+export type DefectLookup =
+  | { ok: true; codigo: string; nombre: string; categoria: string }
+  | { ok: false; code: string; message: string };
+
+export type DefectRegistration =
+  | { ok: true; registered: true; codigo: string; nombre: string; categoria: string }
+  | { ok: false; code: string; message: string; retryable?: boolean };
+
+export function lookupDefect(defectoCodigo: string) {
+  return requestJson<DefectLookup>("/api/station/defect", {
+    method: "POST",
+    body: JSON.stringify({ mode: "lookup", defectoCodigo })
+  });
+}
+
+export function submitDefect(defectoCodigo: string, parCodigo: string) {
+  return requestJson<DefectRegistration>("/api/station/defect", {
+    method: "POST",
+    body: JSON.stringify({ mode: "register", defectoCodigo, parCodigo })
+  });
+}

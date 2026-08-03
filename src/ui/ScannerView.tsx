@@ -31,6 +31,7 @@ type ManualAction = "add" | "remove";
 type Totals = {
   hourTotal: number;
   hourGoal: number | null;
+  hourDefects: number;
 };
 
 type DefectoInfo = {
@@ -38,7 +39,7 @@ type DefectoInfo = {
   nombre: string;
 };
 
-const emptyTotals: Totals = { hourTotal: 0, hourGoal: null };
+const emptyTotals: Totals = { hourTotal: 0, hourGoal: null, hourDefects: 0 };
 
 export function ScannerView({ onLogout }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -89,7 +90,7 @@ export function ScannerView({ onLogout }: Props) {
           return;
         }
         setStatus(result);
-        setTotals({ hourTotal: result.hourTotal, hourGoal: result.hourGoal });
+        setTotals({ hourTotal: result.hourTotal, hourGoal: result.hourGoal, hourDefects: safeCount(result.hourDefects) });
         if (result.scannerStatus !== "ready") {
           setScannerState("paused");
           setNotice({
@@ -519,6 +520,13 @@ export function ScannerView({ onLogout }: Props) {
         <aside className="hour-total-card">
           <span>TOTAL ESTA HORA</span>
           <strong>{totals.hourTotal}</strong>
+          <span
+            className="hour-good-line"
+            style={{ display: "block", marginTop: "0.4rem", fontSize: "0.85rem", opacity: 0.9 }}
+          >
+            TOTAL DE DEFECTOS
+          </span>
+          <strong className="hour-defect-total">{safeCount(totals.hourDefects)}</strong>
         </aside>
       </section>
 
@@ -734,6 +742,10 @@ function adjustmentErrorMessage(code: string, message: string) {
   if (code === "OUTSIDE_SCHEDULE") return "Fuera del horario de produccion.";
   if (code === "REMOVE_NOT_AVAILABLE") return "No hay pares disponibles para quitar.";
   return message;
+}
+
+function safeCount(value: number | null | undefined) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 function formatClock(value: Date) {

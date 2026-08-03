@@ -27,6 +27,7 @@ export type StationStatusData = {
   statusDetail: string;
   hourTotal: number;
   hourGoal: number | null;
+  hourDefects: number;
   dayTotal: number;
   pendingCount: number;
 };
@@ -474,6 +475,7 @@ export async function getStationStatus(
     statusDetail: copy.detail,
     hourTotal: currentBlock ? currentBlock.pares ?? 0 : 0,
     hourGoal: currentBlock ? Math.round(Number(currentBlock.duracion) * Number(jornada.meta_por_hora)) : null,
+    hourDefects: currentBlock ? await getBlockDefectCount(client, currentBlock.id, profile.bandId) : 0,
     dayTotal,
     pendingCount: await getPendingConfirmationCount(client, jornada.id, profile.bandId)
   };
@@ -1089,6 +1091,7 @@ function emptyStationStatus(profile: StationProfile, shiftStatus: "missing" | "c
     statusDetail: "Espera a que DinoCore abra la jornada.",
     hourTotal: 0,
     hourGoal: null,
+    hourDefects: 0,
     dayTotal: 0,
     pendingCount: 0
   };
@@ -1289,6 +1292,24 @@ async function getPendingConfirmationCount(client: SupabaseClient, jornadaId: st
 
   if (error) {
     logStationIssue("confirmaciones_bloque.count", classifySupabaseError(error), {
+      supabaseCode: error.code ?? null
+    });
+    return 0;
+  }
+
+  return count ?? 0;
+}
+
+async function getBlockDefectCount(client: SupabaseClient, blockId: string, bandId: Banda): Promise<number> {
+  const { count, error } = await client
+    .from("calidad_perdidas")
+    .select("id", { count: "exact", head: true })
+    .eq("registro_horario_id", blockId)
+    .eq("banda", bandId)
+    .eq("estado", "activo");
+
+  if (error) {
+    logStationIssue("calidad_perdidas.count", classifySupabaseError(error), {
       supabaseCode: error.code ?? null
     });
     return 0;

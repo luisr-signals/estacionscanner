@@ -31,7 +31,6 @@ type ManualAction = "add" | "remove";
 type Totals = {
   hourTotal: number;
   hourGoal: number | null;
-  hourDefects: number;
 };
 
 type DefectoInfo = {
@@ -39,11 +38,12 @@ type DefectoInfo = {
   nombre: string;
 };
 
-const emptyTotals: Totals = { hourTotal: 0, hourGoal: null, hourDefects: 0 };
+const emptyTotals: Totals = { hourTotal: 0, hourGoal: null };
 
 export function ScannerView({ onLogout }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const busyRef = useRef(false);
+  const defectBusyRef = useRef(false);
   const noticeTimerRef = useRef<number | null>(null);
   const [barcode, setBarcode] = useState("");
   const [status, setStatus] = useState<StationStatus | null>(null);
@@ -89,7 +89,7 @@ export function ScannerView({ onLogout }: Props) {
           return;
         }
         setStatus(result);
-        setTotals({ hourTotal: result.hourTotal, hourGoal: result.hourGoal, hourDefects: result.hourDefects });
+        setTotals({ hourTotal: result.hourTotal, hourGoal: result.hourGoal });
         if (result.scannerStatus !== "ready") {
           setScannerState("paused");
           setNotice({
@@ -246,6 +246,11 @@ export function ScannerView({ onLogout }: Props) {
 
         // SEGUNDO ESCANEO: Confirmación (mismo código)
         if (defectoPendiente.codigo === capturedBarcode) {
+          if (defectBusyRef.current) {
+            focusInput();
+            return;
+          }
+          defectBusyRef.current = true;
           registrarDefecto(defectoInfo, ultimoPar).then((result) => {
             if (result.ok) {
               showNotice({
@@ -265,6 +270,8 @@ export function ScannerView({ onLogout }: Props) {
               playTone("error");
               setDefectoPendiente(null);
             }
+          }).finally(() => {
+            defectBusyRef.current = false;
           });
           focusInput();
           return;
@@ -512,13 +519,6 @@ export function ScannerView({ onLogout }: Props) {
         <aside className="hour-total-card">
           <span>TOTAL ESTA HORA</span>
           <strong>{totals.hourTotal}</strong>
-          <span
-            className="hour-good-line"
-            style={{ display: "block", marginTop: "0.4rem", fontSize: "0.85rem", opacity: 0.9 }}
-          >
-            Buenos <strong>{Math.max(0, totals.hourTotal - totals.hourDefects)}</strong>
-            {" · Defectos " + totals.hourDefects}
-          </span>
         </aside>
       </section>
 

@@ -27,7 +27,6 @@ export type StationStatus = {
   statusDetail: string;
   hourTotal: number;
   hourGoal: number | null;
-  hourDefects: number;
   dayTotal: number;
   pendingCount: number;
 };

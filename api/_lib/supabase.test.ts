@@ -7,6 +7,7 @@ import {
   getScannerPreflight,
   getStationStatus,
   normalizeScannedCode,
+  registerQualityDefect,
   resolveProductForScanner,
   saveManualAdjustment,
   saveStationScan,
@@ -329,6 +330,67 @@ describe("station Supabase scanner writes", () => {
         profile
       })
     ).rejects.toMatchObject({ code: "SHIFT_INACTIVE", status: 409 });
+  });
+
+  it("registers a quality defect through the atomic scanner defect RPC", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: [
+        {
+          perdida_id: "loss-1",
+          defecto_id: "defect-1",
+          defecto_nombre: "Pegamento visible",
+          modelo: null,
+          producto_nombre: null,
+          duplicado: false
+        }
+      ],
+      error: null
+    });
+    const client = makeClient({ product: null, rpc });
+
+    const registered = await registerQualityDefect(client, {
+      defectoCodigo: "def-001",
+      parCodigo: "NOPE",
+      clienteUuid: "abababab-abab-4bab-8bab-abababababab",
+      profile
+    });
+
+    expect(rpc).toHaveBeenCalledWith("registrar_defecto_scanner", {
+      p_cliente_uuid: "abababab-abab-4bab-8bab-abababababab",
+      p_codigo_defecto: "DEF-001",
+      p_codigo_par: "NOPE"
+    });
+    expect(registered).toEqual({
+      nombre: "Pegamento visible",
+      modelo: null,
+      duplicado: false
+    });
+  });
+
+  it("keeps duplicate quality defect state from the RPC", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: [
+        {
+          perdida_id: "loss-1",
+          defecto_id: "defect-1",
+          defecto_nombre: "Pegamento visible",
+          modelo: "Codigo NOPE",
+          producto_nombre: null,
+          duplicado: true
+        }
+      ],
+      error: null
+    });
+    const client = makeClient({ product: null, rpc });
+
+    await expect(
+      registerQualityDefect(client, {
+        defectoCodigo: "DEF-001",
+        parCodigo: "NOPE",
+        clienteUuid: "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd",
+        profile
+      })
+    ).resolves.toMatchObject({ duplicado: true });
   });
 
   it("returns recent scans from the active authorized journey", async () => {

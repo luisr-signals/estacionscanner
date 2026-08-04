@@ -63,9 +63,7 @@ export function ScannerView({ onLogout }: Props) {
   const [manualLoading, setManualLoading] = useState(false);
   const [manualError, setManualError] = useState<string | null>(null);
 
-  // ========== ESTADO PARA DEFECTOS ==========
   const [ultimoPar, setUltimoPar] = useState<string | null>(null);
-  const [defectoPendiente, setDefectoPendiente] = useState<DefectoInfo | null>(null);
 
   const focusInput = useCallback(() => {
     if (manualOpen) return;
@@ -162,7 +160,7 @@ export function ScannerView({ onLogout }: Props) {
     }, tone.durationMs);
   }
 
-  // Pitido doble para confirmar el registro de un defecto (dos "success"
+  // Pitido doble para el registro de un defecto (dos "success"
   // seguidos), distinguible del pitido único de un escaneo de par normal.
   function playDoubleTone(state: ScannerState) {
     playTone(state);
@@ -219,6 +217,14 @@ export function ScannerView({ onLogout }: Props) {
         return;
       }
 
+      if (defectBusyRef.current) {
+        focusInput();
+        return;
+      }
+
+      const parCodigo = ultimoPar;
+      defectBusyRef.current = true;
+
       // Buscar el defecto en Supabase para obtener su nombre
       obtenerDefecto(capturedBarcode).then((defectoInfo) => {
         if (!defectoInfo) {
@@ -232,65 +238,28 @@ export function ScannerView({ onLogout }: Props) {
           return;
         }
 
-        // PRIMER ESCANEO: No hay defecto pendiente
-        if (defectoPendiente === null) {
-          setDefectoPendiente(defectoInfo);
-          showNotice({
-            tone: "waiting",
-            title: `⏳ Defecto pendiente: ${defectoInfo.nombre}`,
-            detail: "Escanea de nuevo el mismo defecto para confirmar"
-          }, false);
-          playTone("waiting");
-          focusInput();
-          return;
-        }
-
-        // SEGUNDO ESCANEO: Confirmación (mismo código)
-        if (defectoPendiente.codigo === capturedBarcode) {
-          if (defectBusyRef.current) {
-            focusInput();
-            return;
+        return registrarDefecto(defectoInfo, parCodigo).then((result) => {
+          if (result.ok) {
+            showNotice({
+              tone: "success",
+              title: `✅ Defecto registrado: ${result.nombre}`,
+              detail: `en ${result.modelo ?? "modelo sin identificar"}`
+            }, true);
+            playDoubleTone("success");
+            refresh();
+          } else {
+            showNotice({
+              tone: "error",
+              title: "❌ Error al registrar defecto",
+              detail: result.message || "Intenta nuevamente"
+            }, false);
+            playTone("error");
           }
-          defectBusyRef.current = true;
-          registrarDefecto(defectoInfo, ultimoPar).then((result) => {
-            if (result.ok) {
-              showNotice({
-                tone: "success",
-                title: `✅ Defecto registrado: ${result.nombre}`,
-                detail: `en ${result.modelo ?? "modelo sin identificar"}`
-              }, true);
-              playDoubleTone("success");
-              setDefectoPendiente(null);
-              refresh();
-            } else {
-              showNotice({
-                tone: "error",
-                title: "❌ Error al registrar defecto",
-                detail: result.message || "Intenta nuevamente"
-              }, false);
-              playTone("error");
-              setDefectoPendiente(null);
-            }
-          }).finally(() => {
-            defectBusyRef.current = false;
-          });
-          focusInput();
-          return;
-        }
-
-        // ESCANEO DE UN DEFECTO DIFERENTE AL PENDIENTE
-        if (defectoPendiente !== null && defectoPendiente.codigo !== capturedBarcode) {
-          setDefectoPendiente(defectoInfo);
-          showNotice({
-            tone: "waiting",
-            title: `🔄 Defecto cambiado: ${defectoInfo.nombre}`,
-            detail: "Escanea de nuevo el mismo defecto para confirmar."
-          }, false);
-          playTone("waiting");
-          focusInput();
-          return;
-        }
+        });
+      }).finally(() => {
+        defectBusyRef.current = false;
       });
+      focusInput();
 
       return;
     }
@@ -298,11 +267,6 @@ export function ScannerView({ onLogout }: Props) {
     // =============================================
     // 2. ES UN CÓDIGO DE PAR (PRODUCCIÓN)
     // =============================================
-    
-    // Resetear defecto pendiente al escanear un nuevo par
-    if (defectoPendiente !== null) {
-      setDefectoPendiente(null);
-    }
 
     // Guardar el código como último par escaneado
     setUltimoPar(capturedBarcode);

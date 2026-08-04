@@ -4,6 +4,28 @@ export function normalizeBarcode(value: string): string {
   return value.trim();
 }
 
+export function normalizeDefectCode(rawValue: string): string {
+  const candidate = stripControlCharacters(rawValue).trim();
+  const match = candidate.match(/^DEF['’´`-](\d{1,2})$/i);
+
+  if (!match) return rawValue.trim();
+
+  const defectNumber = Number(match[1]);
+  if (defectNumber < 1 || defectNumber > 24) return rawValue.trim();
+
+  return "DEF-" + String(defectNumber).padStart(2, "0");
+}
+
+function stripControlCharacters(value: string): string {
+  let normalized = "";
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if ((code >= 0 && code <= 31) || code === 127) continue;
+    normalized += value.charAt(index);
+  }
+  return normalized;
+}
+
 export function canSubmitScan(value: string, isBusy: boolean, isOnline: boolean): boolean {
   return normalizeBarcode(value).length > 0 && !isBusy && isOnline;
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { canSubmitScan, createScanId, normalizeBarcode, scannerTone } from "./scanner";
+import { canSubmitScan, createScanId, normalizeBarcode, normalizeDefectCode, scannerTone } from "./scanner";
 
 describe("scanner capture helpers", () => {
   it("normalizes scanner input before sending it", () => {
@@ -8,6 +8,26 @@ describe("scanner capture helpers", () => {
     expect(normalizeBarcode("0888 930260")).toBe("0888 930260");
     expect(normalizeBarcode("0888\n930260")).toBe("0888\n930260");
     expect(normalizeBarcode("0888930260\n")).not.toBe("888930260");
+  });
+
+  it("normalizes scanner apostrophes in defect codes before classification", () => {
+    expect(normalizeDefectCode("DEF'01")).toBe("DEF-01");
+    expect(normalizeDefectCode("DEF'02")).toBe("DEF-02");
+    expect(normalizeDefectCode("DEF'08")).toBe("DEF-08");
+    expect(normalizeDefectCode("DEF'24")).toBe("DEF-24");
+  });
+
+  it("keeps regular defect hyphen codes working", () => {
+    expect(normalizeDefectCode("DEF-01")).toBe("DEF-01");
+    expect(normalizeDefectCode("def-08")).toBe("DEF-08");
+    expect(normalizeDefectCode(" DEF-24\n")).toBe("DEF-24");
+  });
+
+  it("does not alter product codes or out-of-range defect-like values", () => {
+    expect(normalizeDefectCode("0888930260")).toBe("0888930260");
+    expect(normalizeDefectCode("abc123")).toBe("abc123");
+    expect(normalizeDefectCode("DEF'00")).toBe("DEF'00");
+    expect(normalizeDefectCode("DEF'25")).toBe("DEF'25");
   });
 
   it("blocks empty, busy, or offline submissions", () => {

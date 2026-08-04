@@ -14,7 +14,7 @@ import {
   submitScan
 } from "../lib/api";
 import { canConfirmAdjustment, RecentProduct } from "../lib/manual";
-import { canSubmitScan, createScanId, normalizeBarcode, scannerTone, ScannerState } from "../lib/scanner";
+import { canSubmitScan, createScanId, normalizeBarcode, normalizeDefectCode, scannerTone, ScannerState } from "../lib/scanner";
 
 type Props = {
   onLogout: () => void;
@@ -201,7 +201,7 @@ export function ScannerView({ onLogout }: Props) {
 
   // ========== FUNCIÓN: PROCESAR ESCANEO (MODIFICADA) ==========
   function processScan(rawBarcode: string, triggerKey: string) {
-    const capturedBarcode = rawBarcode.trim();
+    const capturedBarcode = normalizeDefectCode(rawBarcode);
 
     // =============================================
     // 1. ¿ES UN CÓDIGO DE DEFECTO? (Empieza con DEF-)

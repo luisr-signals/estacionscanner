@@ -2,15 +2,18 @@ import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
 const PRODUCTION_USER_ID = "278a5fc3-be3d-460c-ae2c-fa890bfca685";
 const SCANNER_ROLE = "scanner_operator";
+const ADMIN_ROLE = "admin";
+const SUPERVISOR_ROLE = "operacion";
 
 type Banda = 1 | 2;
+type StationRole = "scanner_operator" | "admin" | "operacion";
 export type StationMode = "scanner" | "band_display";
 
 export type StationProfile = {
   userId: string;
   operatorName: string;
-  role: "scanner_operator";
-  bandId: Banda;
+  role: StationRole;
+  bandId: Banda | null;
   bandName: string;
   stationId: string;
   stationMode: StationMode;
@@ -182,7 +185,7 @@ type UsuarioRow = {
   nombre: string;
   correo: string;
   rol: string;
-  banda_asignada: number | null;
+  banda_asignada: number | string | null;
   estacion: string | null;
   station_mode?: string | null;
 };
@@ -339,6 +342,9 @@ export function getSupabaseForToken(accessToken: string): SupabaseClient {
   });
 }
 
+const usuarioProfileColumns = "id,nombre,correo,rol,banda_asignada,estacion,station_mode";
+const usuarioProfileFallbackColumns = "id,nombre,correo,rol,banda_asignada,estacion";
+
 export async function getStationProfile(client: SupabaseClient): Promise<StationProfile> {
   const {
     data: { user },
@@ -350,60 +356,177 @@ export async function getStationProfile(client: SupabaseClient): Promise<Station
     throw new StationDataError("TOKEN_EXPIRED", "Tu sesion vencio. Inicia sesion nuevamente.");
   }
 
-  const { data, error } = await client
-    .from("usuarios")
-    .select("id,nombre,correo,rol,banda_asignada,estacion,station_mode")
-    .eq("id", user.id)
-    .maybeSingle();
-
-  const profileResult =
-    error && error.code === "42703"
-      ? await client.from("usuarios").select("id,nombre,correo,rol,banda_asignada,estacion").eq("id", user.id).maybeSingle()
-      : { data, error };
-
-  if (profileResult.error) {
-    logStationIssue("usuarios.select", classifySupabaseError(profileResult.error), {
+  const authEmail = normalizeProfileEmail(user.email ?? null);
+  const profileById = await selectUsuarioProfileById(client, user.id);
+  if (profileById.error) {
+    logStationIssue("usuarios.select.by_id", classifySupabaseError(profileById.error), {
       userId: user.id,
-      supabaseCode: profileResult.error.code ?? null
+      authEmail,
+      supabaseCode: profileById.error.code ?? null
     });
-    throw new StationDataError(classifySupabaseError(profileResult.error), "No fue posible leer el perfil operativo.");
+    throw new StationDataError(classifySupabaseError(profileById.error), "No fue posible leer el perfil operativo.");
   }
 
-  const profile = profileResult.data as UsuarioRow | null;
+  let profile = profileById.data;
+  const idEmailMatches = profile ? normalizeProfileEmail(profile.correo) === authEmail : false;
+  if ((!profile || !idEmailMatches) && authEmail) {
+    const profileByEmail = await selectUsuarioProfileByEmail(client, authEmail);
+    if (profileByEmail.error) {
+      logStationIssue("usuarios.select.by_email", classifySupabaseError(profileByEmail.error), {
+        userId: user.id,
+        authEmail,
+        supabaseCode: profileByEmail.error.code ?? null
+      });
+      throw new StationDataError(classifySupabaseError(profileByEmail.error), "No fue posible leer el perfil operativo.");
+    }
+    if (profileByEmail.data) profile = profileByEmail.data;
+  }
+
   if (!profile) {
     throw new StationDataError("PROFILE_NOT_FOUND", "No encontramos el perfil operativo de esta cuenta.", {
-      userId: user.id
+      userId: user.id,
+      authEmail
     });
   }
 
-  if (profile.rol !== SCANNER_ROLE) {
+  const role = normalizeStationRole(profile.rol);
+  const bandId = normalizeAssignedBand(profile.banda_asignada);
+  const stationMode = normalizeStationMode(profile.station_mode);
+  const stationId = profile.estacion?.trim() || profile.nombre?.trim() || "Estacion 337";
+
+  logStationIssue("usuarios.profile", "PROFILE_RESOLVED", {
+    userId: user.id,
+    authEmail,
+    profileId: profile.id,
+    profileEmail: normalizeProfileEmail(profile.correo),
+    role: profile.rol,
+    bandRaw: profile.banda_asignada == null ? null : String(profile.banda_asignada),
+    bandType: profile.banda_asignada == null ? "null" : typeof profile.banda_asignada,
+    station: profile.estacion,
+    stationMode: profile.station_mode ?? null
+  });
+
+  if (!role) {
     throw new StationDataError("INVALID_ROLE", "Esta cuenta no tiene permiso para utilizar Estacion 337.", {
-      userId: user.id
+      userId: user.id,
+      role: profile.rol
     });
   }
 
-  if (profile.banda_asignada !== 1 && profile.banda_asignada !== 2) {
-    throw new StationDataError("MISSING_BAND", "La cuenta no tiene una banda asignada.", { userId: user.id });
+  if (role === SCANNER_ROLE && !bandId) {
+    throw new StationDataError("MISSING_BAND", "La cuenta no tiene una banda asignada.", {
+      userId: user.id,
+      bandRaw: profile.banda_asignada == null ? null : String(profile.banda_asignada)
+    });
   }
 
-  if (!profile.estacion || !profile.estacion.trim()) {
-    throw new StationDataError("MISSING_STATION", "La cuenta no tiene una estacion asignada.", { userId: user.id });
-  }
-
-  const stationMode = profile.station_mode == null || profile.station_mode === "" ? "scanner" : profile.station_mode;
   if (stationMode !== "scanner" && stationMode !== "band_display") {
     throw new StationDataError("INVALID_STATION_MODE", "El modo de Estacion 337 no es valido.", { userId: user.id });
   }
 
+  if (stationMode === "band_display" && !bandId) {
+    throw new StationDataError("MISSING_BAND", "La cuenta no tiene una banda asignada.", {
+      userId: user.id,
+      bandRaw: profile.banda_asignada == null ? null : String(profile.banda_asignada)
+    });
+  }
+
   return {
     userId: user.id,
-    operatorName: profile.nombre,
-    role: SCANNER_ROLE,
-    bandId: profile.banda_asignada,
-    bandName: "Banda " + profile.banda_asignada,
-    stationId: profile.estacion,
+    operatorName: profile.nombre?.trim() || profile.correo,
+    role,
+    bandId,
+    bandName: bandId ? "Banda " + bandId : "Sin banda fija",
+    stationId,
     stationMode
   };
+}
+
+async function selectUsuarioProfileById(client: SupabaseClient, userId: string) {
+  const { data, error } = await client
+    .from("usuarios")
+    .select(usuarioProfileColumns)
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (error && error.code === "42703") {
+    const fallback = await client
+      .from("usuarios")
+      .select(usuarioProfileFallbackColumns)
+      .eq("id", userId)
+      .maybeSingle();
+    return { data: fallback.data as UsuarioRow | null, error: fallback.error };
+  }
+
+  return { data: data as UsuarioRow | null, error };
+}
+
+async function selectUsuarioProfileByEmail(client: SupabaseClient, normalizedEmail: string) {
+  const { data, error } = await client
+    .from("usuarios")
+    .select(usuarioProfileColumns)
+    .ilike("correo", "%" + normalizedEmail + "%")
+    .limit(10);
+
+  if (error && error.code === "42703") {
+    return selectUsuarioProfileByEmailWithoutStationMode(client, normalizedEmail);
+  }
+  if (error) return { data: null, error };
+
+  return {
+    data: ((data as UsuarioRow[] | null) ?? []).find((row) => normalizeProfileEmail(row.correo) === normalizedEmail) ?? null,
+    error: null
+  };
+}
+
+async function selectUsuarioProfileByEmailWithoutStationMode(client: SupabaseClient, normalizedEmail: string) {
+  const { data, error } = await client
+    .from("usuarios")
+    .select(usuarioProfileFallbackColumns)
+    .ilike("correo", "%" + normalizedEmail + "%")
+    .limit(10);
+
+  if (error) return { data: null, error };
+  return {
+    data: ((data as UsuarioRow[] | null) ?? []).find((row) => normalizeProfileEmail(row.correo) === normalizedEmail) ?? null,
+    error: null
+  };
+}
+
+function normalizeProfileEmail(email: string | null) {
+  return (email ?? "").trim().toLowerCase();
+}
+
+function normalizeStationRole(role: string): StationRole | null {
+  const normalized = role.trim().toLowerCase();
+  if (normalized === SCANNER_ROLE) return SCANNER_ROLE;
+  if (normalized === ADMIN_ROLE) return ADMIN_ROLE;
+  if (normalized === SUPERVISOR_ROLE) return SUPERVISOR_ROLE;
+  return null;
+}
+
+function normalizeAssignedBand(value: number | string | null): Banda | null {
+  if (value === 1 || value === 2) return value;
+  if (value == null) return null;
+  const normalized = String(value)
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+  if (normalized === "1" || normalized === "banda 1") return 1;
+  if (normalized === "2" || normalized === "banda 2") return 2;
+  return null;
+}
+
+function normalizeStationMode(value: string | null | undefined): StationMode | "invalid" {
+  const normalized = (value ?? "").trim();
+  if (!normalized) return "scanner";
+  if (normalized === "scanner" || normalized === "band_display") return normalized;
+  return "invalid";
+}
+
+function requireAssignedBand(profile: StationProfile): Banda {
+  if (profile.bandId === 1 || profile.bandId === 2) return profile.bandId;
+  throw new StationDataError("MISSING_BAND", "Selecciona una banda antes de continuar.", { userId: profile.userId });
 }
 
 export function assertStationMode(profile: StationProfile, expected: StationMode) {
@@ -420,11 +543,12 @@ export async function getStationStatus(
   profile: StationProfile,
   now = new Date()
 ): Promise<StationStatusData> {
+  const bandId = requireAssignedBand(profile);
   const { data: jornadaData, error: jornadaError } = await client
     .from("jornadas")
     .select("*")
     .eq("usuario_id", PRODUCTION_USER_ID)
-    .eq("banda", profile.bandId)
+    .eq("banda", bandId)
     .order("fecha", { ascending: false })
     .order("created_at", { ascending: false })
     .limit(1)
@@ -475,9 +599,9 @@ export async function getStationStatus(
     statusDetail: copy.detail,
     hourTotal: currentBlock ? currentBlock.pares ?? 0 : 0,
     hourGoal: currentBlock ? Math.round(Number(currentBlock.duracion) * Number(jornada.meta_por_hora)) : null,
-    hourDefects: currentBlock ? await getBlockDefectCount(client, currentBlock.id, profile.bandId) : 0,
+    hourDefects: currentBlock ? await getBlockDefectCount(client, currentBlock.id, bandId) : 0,
     dayTotal,
-    pendingCount: await getPendingConfirmationCount(client, jornada.id, profile.bandId)
+    pendingCount: await getPendingConfirmationCount(client, jornada.id, bandId)
   };
 }
 
@@ -486,11 +610,12 @@ export async function getDisplayStatus(
   profile: StationProfile,
   now = new Date()
 ): Promise<DisplayStatusData> {
+  const bandId = requireAssignedBand(profile);
   const { data: jornadaData, error: jornadaError } = await client
     .from("jornadas")
     .select("*")
     .eq("usuario_id", PRODUCTION_USER_ID)
-    .eq("banda", profile.bandId)
+    .eq("banda", bandId)
     .order("fecha", { ascending: false })
     .order("created_at", { ascending: false })
     .limit(1)
@@ -817,6 +942,7 @@ export async function getScannerPreflight(
   compareCodes: string[] = [],
   now = new Date()
 ): Promise<ScannerPreflightData> {
+  const bandId = requireAssignedBand(profile);
   const trimmed = rawCode.trim();
   const normalizedCode = normalizeScannedCode(rawCode);
   const codes = [rawCode, ...compareCodes].filter((code, index, values) => code && values.indexOf(code) === index);
@@ -824,7 +950,7 @@ export async function getScannerPreflight(
   const primary = catalogChecks[0] ?? null;
   const productReady = Boolean(primary?.product && primary.product.status === "activo");
 
-  const jornada = await getActiveJourney(client, profile.bandId);
+  const jornada = await getActiveJourney(client, bandId);
   let registros: RegistroHorarioRow[] = [];
   if (jornada) {
     registros = await getJourneyRegisters(client, jornada.id, profile.userId);
@@ -844,7 +970,7 @@ export async function getScannerPreflight(
     profile: {
       userId: profile.userId,
       role: profile.role,
-      bandId: profile.bandId,
+      bandId,
       bandName: profile.bandName,
       stationId: profile.stationId,
       stationMode: profile.stationMode
@@ -885,14 +1011,15 @@ export async function getScannerPreflight(
 }
 
 export async function getRecentScans(client: SupabaseClient, profile: StationProfile): Promise<RecentScanData[]> {
-  const jornada = await getActiveJourney(client, profile.bandId);
+  const bandId = requireAssignedBand(profile);
+  const jornada = await getActiveJourney(client, bandId);
   if (!jornada) return [];
 
   const { data, error } = await client
     .from("produccion_eventos")
     .select("id,codigo,codigo_normalizado,estado_identificacion,hora_registro,hora_local,producto_id,cantidad,estado,origen,productos(id,codigo_id,cliente_marca,modelo,color,talla,estado)")
     .eq("jornada_id", jornada.id)
-    .eq("banda", profile.bandId)
+    .eq("banda", bandId)
     .order("hora_registro", { ascending: false })
     .limit(10);
 
@@ -920,14 +1047,15 @@ export async function getRecentScans(client: SupabaseClient, profile: StationPro
 }
 
 export async function getManualProducts(client: SupabaseClient, profile: StationProfile): Promise<ManualProductData[]> {
-  const jornada = await getActiveJourney(client, profile.bandId);
+  const bandId = requireAssignedBand(profile);
+  const jornada = await getActiveJourney(client, bandId);
   if (!jornada) return [];
 
   const { data, error } = await client
     .from("produccion_eventos")
     .select("id,producto_id,estado,productos(id,codigo_id,cliente_marca,modelo,color,talla,estado)")
     .eq("jornada_id", jornada.id)
-    .eq("banda", profile.bandId)
+    .eq("banda", bandId)
     .eq("estado", "activo")
     .not("producto_id", "is", null)
     .order("created_at", { ascending: false })
@@ -1436,7 +1564,8 @@ async function findWorkedProductById(
   profile: StationProfile,
   productId: string
 ): Promise<ProductoRow | null> {
-  const jornada = await getActiveJourney(client, profile.bandId);
+  const bandId = requireAssignedBand(profile);
+  const jornada = await getActiveJourney(client, bandId);
   if (!jornada) {
     throw new StationScanError("SHIFT_INACTIVE", "La jornada de " + profile.bandName + " no esta disponible.", 409);
   }
@@ -1445,7 +1574,7 @@ async function findWorkedProductById(
     .from("produccion_eventos")
     .select("producto_id,productos(id,codigo_id,cliente_marca,modelo,color,talla,estado)")
     .eq("jornada_id", jornada.id)
-    .eq("banda", profile.bandId)
+    .eq("banda", bandId)
     .eq("producto_id", productId)
     .eq("estado", "activo")
     .limit(1)

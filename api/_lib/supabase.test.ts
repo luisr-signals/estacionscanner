@@ -5,6 +5,7 @@ import {
   getManualProducts,
   getRecentScans,
   getScannerPreflight,
+  getStationProfile,
   getStationStatus,
   normalizeScannedCode,
   registerQualityDefect,
@@ -41,6 +42,109 @@ const leadingZeroProduct = {
   codigo_id: "0888930260",
   modelo: "Etiqueta Dino"
 };
+
+const authUser = {
+  id: "f1ad2dec-2119-4b7b-94a5-740c308a82eb",
+  email: " operador1@dinocore.mx "
+};
+
+const operatorUser = {
+  id: "f1ad2dec-2119-4b7b-94a5-740c308a82eb",
+  nombre: "Operador 1",
+  correo: "operador1@dinocore.mx",
+  rol: "scanner_operator",
+  banda_asignada: 1,
+  estacion: null,
+  station_mode: "scanner"
+};
+
+describe("station profile resolution", () => {
+  it("reads operador1 by auth id and accepts Banda 1 from banda_asignada", async () => {
+    const client = makeClient({ product, rpc: vi.fn(), authUser, usuarios: [operatorUser] });
+
+    await expect(getStationProfile(client)).resolves.toMatchObject({
+      userId: authUser.id,
+      operatorName: "Operador 1",
+      role: "scanner_operator",
+      bandId: 1,
+      bandName: "Banda 1",
+      stationId: "Operador 1",
+      stationMode: "scanner"
+    });
+  });
+
+  it("falls back to normalized email when the auth id does not match public.usuarios.id", async () => {
+    const client = makeClient({
+      product,
+      rpc: vi.fn(),
+      authUser: { id: "auth-id-only", email: " OPERADOR1@DINOCORE.MX " },
+      usuarios: [{ ...operatorUser, id: "public-user-id", correo: "operador1@dinocore.mx", banda_asignada: "Banda 1" }]
+    });
+
+    await expect(getStationProfile(client)).resolves.toMatchObject({
+      userId: "auth-id-only",
+      bandId: 1,
+      bandName: "Banda 1"
+    });
+  });
+
+  it("rejects a scanner_operator only when the real banda_asignada value is empty or invalid", async () => {
+    const client = makeClient({
+      product,
+      rpc: vi.fn(),
+      authUser,
+      usuarios: [{ ...operatorUser, banda_asignada: null }]
+    });
+
+    await expect(getStationProfile(client)).rejects.toMatchObject({ code: "MISSING_BAND" });
+  });
+
+  it("allows admin profiles without inventing a default band", async () => {
+    const client = makeClient({
+      product,
+      rpc: vi.fn(),
+      authUser: { id: "admin-auth", email: "luis@dinoskulls.com" },
+      usuarios: [
+        {
+          id: "admin-auth",
+          nombre: "Luis Romero",
+          correo: "luis@dinoskulls.com",
+          rol: "admin",
+          banda_asignada: null,
+          estacion: null,
+          station_mode: "scanner"
+        }
+      ]
+    });
+
+    await expect(getStationProfile(client)).resolves.toMatchObject({
+      role: "admin",
+      bandId: null,
+      bandName: "Sin banda fija"
+    });
+  });
+
+  it("rejects direction users by role", async () => {
+    const client = makeClient({
+      product,
+      rpc: vi.fn(),
+      authUser: { id: "director-auth", email: "ximena@dinoskulls.com" },
+      usuarios: [
+        {
+          id: "director-auth",
+          nombre: "Ximena Contabilidad",
+          correo: "ximena@dinoskulls.com",
+          rol: "director_general",
+          banda_asignada: null,
+          estacion: null,
+          station_mode: "scanner"
+        }
+      ]
+    });
+
+    await expect(getStationProfile(client)).rejects.toMatchObject({ code: "INVALID_ROLE" });
+  });
+});
 
 describe("station Supabase scanner writes", () => {
   it("keeps leading-zero barcodes as text through catalog resolution", async () => {
@@ -705,7 +809,9 @@ function makeClient({
   jornada,
   registros,
   eventConfirmationError = false,
-  eventCode = "ABC123"
+  eventCode = "ABC123",
+  authUser: authUserOverride,
+  usuarios = []
 }: {
   product: typeof product | null;
   rpc: ReturnType<typeof vi.fn>;
@@ -715,11 +821,29 @@ function makeClient({
   registros?: unknown[];
   eventConfirmationError?: boolean;
   eventCode?: string;
+  authUser?: { id: string; email: string | null };
+  usuarios?: unknown[];
 }) {
   return {
+    auth: {
+      getUser: vi.fn().mockResolvedValue({
+        data: { user: authUserOverride ?? { id: profile.userId, email: "operador1@dinocore.mx" } },
+        error: null
+      })
+    },
     rpc,
     from(table: string) {
-      return new FakeQuery(table, activeProduct, manualEvents, duplicateManualEvents, jornada, registros, eventConfirmationError, eventCode);
+      return new FakeQuery(
+        table,
+        activeProduct,
+        manualEvents,
+        duplicateManualEvents,
+        jornada,
+        registros,
+        eventConfirmationError,
+        eventCode,
+        usuarios
+      );
     }
   } as never;
 }
@@ -736,7 +860,8 @@ class FakeQuery {
     private jornada?: Partial<{ id: string; estado: "activa" | "cerrada"; banda: 1; meta_por_hora: number; hora_inicio: number; hora_fin_efectiva: number }>,
     private registros?: unknown[],
     private eventConfirmationError = false,
-    private eventCode = "ABC123"
+    private eventCode = "ABC123",
+    private usuarios: unknown[] = []
   ) {}
 
   select(columns: string) {
@@ -745,6 +870,11 @@ class FakeQuery {
   }
 
   eq(column: string, value: unknown) {
+    this.filters.set(column, value);
+    return this;
+  }
+
+  ilike(column: string, value: string) {
     this.filters.set(column, value);
     return this;
   }
@@ -762,6 +892,11 @@ class FakeQuery {
   }
 
   async maybeSingle() {
+    if (this.table === "usuarios") {
+      const id = this.filters.get("id");
+      const row = this.usuarios.find((usuario) => (usuario as { id?: unknown }).id === id) ?? null;
+      return { data: row, error: null };
+    }
     if (this.table === "productos") {
       const requestedCode = this.filters.get("codigo_id");
       const requestedSku = this.filters.get("sku");
@@ -823,6 +958,16 @@ class FakeQuery {
   }
 
   async then(resolve: (value: { data: unknown[]; error: null }) => void) {
+    if (this.table === "usuarios") {
+      const correoFilter = String(this.filters.get("correo") ?? "").replace(/%/g, "").trim().toLowerCase();
+      resolve({
+        data: this.usuarios.filter(
+          (usuario) => String((usuario as { correo?: unknown }).correo ?? "").trim().toLowerCase() === correoFilter
+        ),
+        error: null
+      });
+      return;
+    }
     if (this.table === "produccion_eventos") {
       if (this.selected.startsWith("id,producto_id")) {
         resolve({ data: this.manualEventRows(), error: null });

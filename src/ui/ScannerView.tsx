@@ -33,16 +33,6 @@ type Totals = {
   hourDefects: number;
 };
 
-// Referencia al último par registrado CORRECTAMENTE (no el texto del input, que
-// se limpia tras cada lectura). Persiste mientras la pantalla siga abierta y es
-// el modelo al que se asocian los defectos que se escaneen después. El `codigo`
-// es el que la RPC re-resuelve a jornada/bloque/banda/producto server-side.
-type UltimoParRef = {
-  codigo: string;
-  productId: string | null;
-  producto: string;
-};
-
 const emptyTotals: Totals = { hourTotal: 0, hourGoal: null, hourDefects: 0 };
 
 export function ScannerView({ onLogout }: Props) {
@@ -67,9 +57,8 @@ export function ScannerView({ onLogout }: Props) {
   const [manualLoading, setManualLoading] = useState(false);
   const [manualError, setManualError] = useState<string | null>(null);
 
-  // Refs (no estado): se leen sincrónicamente en el escaneo, inmunes a las
-  // actualizaciones asíncronas de React.
-  const ultimoParRef = useRef<UltimoParRef | null>(null);
+  // Dedup de defectos por escaneo (no es la referencia del modelo — esa vive en
+  // la base de datos). Se lee sincrónicamente, inmune al estado asíncrono.
   const lastDefectRef = useRef<{ codigo: string; at: number } | null>(null);
 
   const focusInput = useCallback(() => {
@@ -190,17 +179,9 @@ export function ScannerView({ onLogout }: Props) {
     // 1. ¿ES UN CÓDIGO DE DEFECTO? (Empieza con DEF-) -> registro de UN escaneo
     // =============================================
     if (capturedBarcode.startsWith('DEF-')) {
-      const referencia = ultimoParRef.current;
-      if (!referencia) {
-        showNotice({
-          tone: "error",
-          title: "❌ Sin par de referencia",
-          detail: "Primero registra un par antes de escanear un defecto."
-        }, false);
-        playTone("error");
-        focusInput();
-        return;
-      }
+      // Ya NO se exige un "par de referencia" en memoria: la RPC resuelve el
+      // último modelo producido desde la base de datos (jornada activa). Aquí solo
+      // se protege contra registros duplicados del MISMO escaneo.
 
       // Anti-duplicado 1: ya hay un registro de defecto en curso (doble Enter /
       // lecturas simultáneas).
@@ -208,11 +189,12 @@ export function ScannerView({ onLogout }: Props) {
         focusInput();
         return;
       }
-      // Anti-duplicado 2: el MISMO defecto repetido en <1.5s (rebote del lector o
-      // doble Enter ya completado). Defectos DISTINTOS pasan de inmediato.
+      // Anti-duplicado 2: el MISMO defecto repetido en <400ms (rebote del lector o
+      // doble Enter ya completado). Defectos consecutivos a ritmo humano —incluido
+      // el mismo defecto en varios pares— pasan sin problema.
       const ahora = Date.now();
       const ultimo = lastDefectRef.current;
-      if (ultimo && ultimo.codigo === capturedBarcode && ahora - ultimo.at < 1500) {
+      if (ultimo && ultimo.codigo === capturedBarcode && ahora - ultimo.at < 400) {
         focusInput();
         return;
       }
@@ -221,11 +203,11 @@ export function ScannerView({ onLogout }: Props) {
       defectBusyRef.current = true;
       showNotice({ tone: "waiting", title: "Registrando defecto...", detail: capturedBarcode }, false);
 
-      // Un escaneo = un solo submitDefect. La RPC registrar_defecto_scanner asocia
-      // el defecto al modelo/jornada/banda/hora del último par (referencia.codigo)
-      // e inserta en calidad_perdidas (módulo de Calidad de DinoCore).
+      // Un escaneo = un solo submitDefect. La RPC registrar_defecto_scanner busca
+      // el último modelo producido en la jornada (base de datos) y asocia el
+      // defecto; inserta en calidad_perdidas (módulo de Calidad de DinoCore).
       const clienteUuid = createScanId();
-      submitDefect(capturedBarcode, referencia.codigo, clienteUuid)
+      submitDefect(capturedBarcode, clienteUuid)
         .then((result) => {
           if (result.ok) {
             showNotice({
@@ -259,9 +241,6 @@ export function ScannerView({ onLogout }: Props) {
     // =============================================
     // 2. ES UN CÓDIGO DE PAR (PRODUCCIÓN) — flujo original, sin cambios
     // =============================================
-    // La referencia del último par NO se guarda aquí, sino solo cuando el
-    // registro se confirma correctamente (ver el submitScan de abajo). Así un
-    // escaneo bloqueado, inválido o fallido nunca queda como referencia.
     if (busyRef.current) {
       logScanInput("blocked_duplicate", capturedBarcode, triggerKey);
       return;
@@ -299,10 +278,9 @@ export function ScannerView({ onLogout }: Props) {
       .then((result) => {
         if (result.ok) {
           setScannerState("success");
-          // Referencia del último par registrado CORRECTAMENTE (persiste mientras
-          // la pantalla siga abierta). Se guarda el código real escaneado, que la
-          // RPC de defectos re-resuelve a producto/jornada/bloque/banda.
-          ultimoParRef.current = { codigo: cleanBarcode, productId: result.productId, producto: result.product };
+          // El "último modelo" ya no se guarda en memoria: queda persistido en
+          // produccion_eventos (este mismo registro) y la RPC de defectos lo lee
+          // desde ahí. Así sobrevive a recargas, cambios de operador y reinicios.
           setTotals((prev) => ({ ...prev, hourTotal: result.hourTotal, hourGoal: result.hourGoal }));
           showNotice(
             {

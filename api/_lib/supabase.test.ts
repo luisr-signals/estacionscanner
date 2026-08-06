@@ -454,15 +454,13 @@ describe("station Supabase scanner writes", () => {
 
     const registered = await registerQualityDefect(client, {
       defectoCodigo: "def-001",
-      parCodigo: "NOPE",
       clienteUuid: "abababab-abab-4bab-8bab-abababababab",
       profile
     });
 
     expect(rpc).toHaveBeenCalledWith("registrar_defecto_scanner", {
       p_cliente_uuid: "abababab-abab-4bab-8bab-abababababab",
-      p_codigo_defecto: "DEF-001",
-      p_codigo_par: "NOPE"
+      p_codigo_defecto: "DEF-001"
     });
     expect(registered).toEqual({
       nombre: "Pegamento visible",
@@ -490,7 +488,6 @@ describe("station Supabase scanner writes", () => {
     await expect(
       registerQualityDefect(client, {
         defectoCodigo: "DEF-001",
-        parCodigo: "NOPE",
         clienteUuid: "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd",
         profile
       })

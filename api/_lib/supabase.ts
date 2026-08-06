@@ -310,6 +310,7 @@ export class StationScanError extends Error {
       | "DEFECT_PERMISSION_DENIED"
       | "DEFECT_LOOKUP_FAILED"
       | "DEFECT_NOT_CONFIGURED"
+      | "DEFECT_NO_MODEL"
       | "PAIR_NOT_FOUND"
       | "DEFECT_REGISTER_FAILED",
     message: string,
@@ -1145,20 +1146,17 @@ type RegistrarDefectoRpcRow = {
 
 export async function registerQualityDefect(
   client: SupabaseClient,
-  params: { defectoCodigo: string; parCodigo: string; clienteUuid: string; profile: StationProfile }
+  params: { defectoCodigo: string; clienteUuid: string; profile: StationProfile }
 ): Promise<QualityDefectRegistration> {
-  const parCodigo = params.parCodigo.trim();
-  if (!parCodigo) {
-    throw new StationScanError("PAIR_NOT_FOUND", "No hay par escaneado.", 400);
-  }
   if (!isUuid(params.clienteUuid.trim())) {
     throw new StationScanError("INVALID_ADJUSTMENT_ID", "Identificador de registro invalido.", 400);
   }
 
+  // Un solo argumento de defecto: la RPC resuelve el ÚLTIMO MODELO producido en
+  // la jornada desde la base de datos (no depende de un par enviado por el cliente).
   const { data, error } = await client.rpc("registrar_defecto_scanner", {
     p_cliente_uuid: params.clienteUuid.trim(),
-    p_codigo_defecto: params.defectoCodigo.trim().toUpperCase(),
-    p_codigo_par: parCodigo
+    p_codigo_defecto: params.defectoCodigo.trim().toUpperCase()
   });
 
   if (error) {
@@ -1171,7 +1169,11 @@ export async function registerQualityDefect(
       throw new StationScanError("DEFECT_PERMISSION_DENIED", "Esta cuenta no tiene permiso para registrar defectos.", 403);
     }
     if (error.code === "42883" || error.code === "PGRST202" || /function .* does not exist|could not find.*function|schema cache/i.test(message)) {
-      throw new StationScanError("DEFECT_NOT_CONFIGURED", "Falta aplicar la migracion 0031 (registrar_defecto_scanner) en Supabase.", 501);
+      throw new StationScanError("DEFECT_NOT_CONFIGURED", "Falta aplicar la migracion 0032 (registrar_defecto_scanner) en Supabase.", 501);
+    }
+    // Antes que el chequeo de "jornada": el mensaje de "sin modelo" también la menciona.
+    if (/NO_MODELO_REFERENCIA|modelo registrado/i.test(message)) {
+      throw new StationScanError("DEFECT_NO_MODEL", "Aun no hay un modelo registrado en la jornada activa.", 409);
     }
     if (/Defecto no encontrado/i.test(message)) {
       throw new StationScanError("DEFECT_NOT_FOUND", "El codigo de defecto no existe en el catalogo.", 404);

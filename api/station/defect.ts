@@ -19,14 +19,10 @@ export default async function handler(req: ApiRequest, res: ApiResponse<any>) {
   const body = (req.body || {}) as Record<string, unknown>;
   const mode = readString(body.mode) || "register";
   const defectoCodigo = readString(body.defectoCodigo);
-  const parCodigo = readString(body.parCodigo);
   const clienteUuid = readString(body.clienteUuid);
 
   if (!defectoCodigo) {
     return jsonError(res, 400, "INVALID_DEFECT", "El codigo de defecto es obligatorio.");
-  }
-  if (mode === "register" && !parCodigo) {
-    return jsonError(res, 400, "PAIR_REQUIRED", "Escanea primero un par antes de registrar un defecto.");
   }
   if (mode === "register" && !clienteUuid) {
     return jsonError(res, 400, "INVALID_DEFECT", "Falta el identificador de registro.");
@@ -42,7 +38,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse<any>) {
       return res.status(200).json({ ok: true, ...defecto });
     }
 
-    const registered = await registerQualityDefect(client, { defectoCodigo, parCodigo, clienteUuid, profile });
+    const registered = await registerQualityDefect(client, { defectoCodigo, clienteUuid, profile });
     return res.status(200).json({ ok: true, registered: true, ...registered });
   } catch (error) {
     if (error instanceof StationDataError) {

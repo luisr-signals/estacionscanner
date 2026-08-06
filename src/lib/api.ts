@@ -196,9 +196,9 @@ export function lookupDefect(defectoCodigo: string) {
   });
 }
 
-export function submitDefect(defectoCodigo: string, parCodigo: string, clienteUuid: string) {
+export function submitDefect(defectoCodigo: string, clienteUuid: string) {
   return requestJson<DefectRegistration>("/api/station/defect", {
     method: "POST",
-    body: JSON.stringify({ mode: "register", defectoCodigo, parCodigo, clienteUuid })
+    body: JSON.stringify({ mode: "register", defectoCodigo, clienteUuid })
   });
 }

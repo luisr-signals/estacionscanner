@@ -4,7 +4,6 @@ import {
   getRecent,
   getStatus,
   logout,
-  lookupDefect,
   ManualProduct,
   MovementQuantity,
   RecentScan,
@@ -34,9 +33,14 @@ type Totals = {
   hourDefects: number;
 };
 
-type DefectoInfo = {
+// Referencia al último par registrado CORRECTAMENTE (no el texto del input, que
+// se limpia tras cada lectura). Persiste mientras la pantalla siga abierta y es
+// el modelo al que se asocian los defectos que se escaneen después. El `codigo`
+// es el que la RPC re-resuelve a jornada/bloque/banda/producto server-side.
+type UltimoParRef = {
   codigo: string;
-  nombre: string;
+  productId: string | null;
+  producto: string;
 };
 
 const emptyTotals: Totals = { hourTotal: 0, hourGoal: null, hourDefects: 0 };
@@ -63,7 +67,10 @@ export function ScannerView({ onLogout }: Props) {
   const [manualLoading, setManualLoading] = useState(false);
   const [manualError, setManualError] = useState<string | null>(null);
 
-  const [ultimoPar, setUltimoPar] = useState<string | null>(null);
+  // Refs (no estado): se leen sincrónicamente en el escaneo, inmunes a las
+  // actualizaciones asíncronas de React.
+  const ultimoParRef = useRef<UltimoParRef | null>(null);
+  const lastDefectRef = useRef<{ codigo: string; at: number } | null>(null);
 
   const focusInput = useCallback(() => {
     if (manualOpen) return;
@@ -167,78 +174,59 @@ export function ScannerView({ onLogout }: Props) {
     window.setTimeout(() => playTone(state), 180);
   }
 
-  // ========== FUNCIÓN: OBTENER DATOS DEL DEFECTO (vía endpoint serverless) ==========
-  async function obtenerDefecto(codigo: string): Promise<DefectoInfo | null> {
-    try {
-      const result = await lookupDefect(codigo);
-      if (!result.ok) return null;
-      return { codigo: result.codigo, nombre: result.nombre };
-    } catch (error) {
-      console.error('Error al buscar defecto:', error);
-      return null;
-    }
-  }
-
-  // ========== FUNCIÓN: REGISTRAR DEFECTO (vía endpoint serverless) ==========
-  // El servidor llama a la RPC registrar_defecto_scanner (SECURITY DEFINER en
-  // DinoCore), que resuelve jornada+bloque+producto e inserta en
-  // calidad_perdidas — la tabla que lee el módulo de Calidad de DinoCore.
-  async function registrarDefecto(defectoInfo: DefectoInfo, parCodigo: string) {
-    try {
-      const clienteUuid = createScanId();
-      const result = await submitDefect(defectoInfo.codigo, parCodigo, clienteUuid);
-      if (!result.ok) {
-        return { ok: false as const, message: result.message || 'No se pudo registrar el defecto' };
-      }
-      return { ok: true as const, nombre: result.nombre, modelo: result.modelo };
-    } catch (error) {
-      console.error('Error al registrar defecto:', error);
-      return { ok: false as const, message: 'Sin conexion. No se confirmo el defecto.' };
-    }
-  }
-
-  // ========== FUNCIÓN: PROCESAR ESCANEO (MODIFICADA) ==========
+  // ========== FUNCIÓN: PROCESAR ESCANEO ==========
+  // `rawBarcode` viene del evento/DOM (leído antes de limpiar el input, ver
+  // handleKeyDown), nunca del estado `barcode` que se limpia de forma asíncrona.
   function processScan(rawBarcode: string, triggerKey: string) {
     const capturedBarcode = normalizeDefectCode(rawBarcode);
 
+    // Enter sin código (p. ej. doble Enter con el input ya limpio): ignorar.
+    if (!capturedBarcode) {
+      focusInput();
+      return;
+    }
+
     // =============================================
-    // 1. ¿ES UN CÓDIGO DE DEFECTO? (Empieza con DEF-)
+    // 1. ¿ES UN CÓDIGO DE DEFECTO? (Empieza con DEF-) -> registro de UN escaneo
     // =============================================
     if (capturedBarcode.startsWith('DEF-')) {
-      // Verificar que haya un último par escaneado
-      if (!ultimoPar) {
+      const referencia = ultimoParRef.current;
+      if (!referencia) {
         showNotice({
           tone: "error",
-          title: "❌ Error: No hay par escaneado",
-          detail: "Escanea primero un par antes de registrar un defecto."
+          title: "❌ Sin par de referencia",
+          detail: "Primero registra un par antes de escanear un defecto."
         }, false);
         playTone("error");
         focusInput();
         return;
       }
 
+      // Anti-duplicado 1: ya hay un registro de defecto en curso (doble Enter /
+      // lecturas simultáneas).
       if (defectBusyRef.current) {
         focusInput();
         return;
       }
+      // Anti-duplicado 2: el MISMO defecto repetido en <1.5s (rebote del lector o
+      // doble Enter ya completado). Defectos DISTINTOS pasan de inmediato.
+      const ahora = Date.now();
+      const ultimo = lastDefectRef.current;
+      if (ultimo && ultimo.codigo === capturedBarcode && ahora - ultimo.at < 1500) {
+        focusInput();
+        return;
+      }
+      lastDefectRef.current = { codigo: capturedBarcode, at: ahora };
 
-      const parCodigo = ultimoPar;
       defectBusyRef.current = true;
+      showNotice({ tone: "waiting", title: "Registrando defecto...", detail: capturedBarcode }, false);
 
-      // Buscar el defecto en Supabase para obtener su nombre
-      obtenerDefecto(capturedBarcode).then((defectoInfo) => {
-        if (!defectoInfo) {
-          showNotice({
-            tone: "error",
-            title: "❌ Defecto no reconocido",
-            detail: `El código "${capturedBarcode}" no existe en el catálogo.`
-          }, false);
-          playTone("error");
-          focusInput();
-          return;
-        }
-
-        return registrarDefecto(defectoInfo, parCodigo).then((result) => {
+      // Un escaneo = un solo submitDefect. La RPC registrar_defecto_scanner asocia
+      // el defecto al modelo/jornada/banda/hora del último par (referencia.codigo)
+      // e inserta en calidad_perdidas (módulo de Calidad de DinoCore).
+      const clienteUuid = createScanId();
+      submitDefect(capturedBarcode, referencia.codigo, clienteUuid)
+        .then((result) => {
           if (result.ok) {
             showNotice({
               tone: "success",
@@ -255,23 +243,25 @@ export function ScannerView({ onLogout }: Props) {
             }, false);
             playTone("error");
           }
+        })
+        .catch(() => {
+          showNotice({ tone: "offline", title: "Sin conexion", detail: "No se confirmo el defecto" }, false);
+          playTone("error");
+        })
+        .finally(() => {
+          defectBusyRef.current = false;
+          focusInput();
         });
-      }).finally(() => {
-        defectBusyRef.current = false;
-      });
-      focusInput();
 
       return;
     }
 
     // =============================================
-    // 2. ES UN CÓDIGO DE PAR (PRODUCCIÓN)
+    // 2. ES UN CÓDIGO DE PAR (PRODUCCIÓN) — flujo original, sin cambios
     // =============================================
-
-    // Guardar el código como último par escaneado
-    setUltimoPar(capturedBarcode);
-
-    // --- FLUJO ORIGINAL DE PRODUCCIÓN ---
+    // La referencia del último par NO se guarda aquí, sino solo cuando el
+    // registro se confirma correctamente (ver el submitScan de abajo). Así un
+    // escaneo bloqueado, inválido o fallido nunca queda como referencia.
     if (busyRef.current) {
       logScanInput("blocked_duplicate", capturedBarcode, triggerKey);
       return;
@@ -309,6 +299,10 @@ export function ScannerView({ onLogout }: Props) {
       .then((result) => {
         if (result.ok) {
           setScannerState("success");
+          // Referencia del último par registrado CORRECTAMENTE (persiste mientras
+          // la pantalla siga abierta). Se guarda el código real escaneado, que la
+          // RPC de defectos re-resuelve a producto/jornada/bloque/banda.
+          ultimoParRef.current = { codigo: cleanBarcode, productId: result.productId, producto: result.product };
           setTotals((prev) => ({ ...prev, hourTotal: result.hourTotal, hourGoal: result.hourGoal }));
           showNotice(
             {
@@ -352,7 +346,15 @@ export function ScannerView({ onLogout }: Props) {
   function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
     if (event.key !== "Enter") return;
     event.preventDefault();
-    processScan(event.currentTarget.value, event.key);
+    // Se lee el valor del evento y se limpia el input (DOM + estado) ANTES de
+    // procesar. Así: (a) el código nunca se reutiliza, (b) un segundo Enter
+    // accidental lee un campo vacío y queda ignorado, y (c) el siguiente producto
+    // se escanea limpio (sin residuos que generen "sin identificar"). No depende
+    // del estado `barcode`, que React actualiza de forma asíncrona.
+    const value = event.currentTarget.value;
+    event.currentTarget.value = "";
+    setBarcode("");
+    processScan(value, event.key);
   }
 
   function handleInput(event: FormEvent<HTMLInputElement>) {
